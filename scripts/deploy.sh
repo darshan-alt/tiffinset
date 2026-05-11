@@ -3,7 +3,7 @@ set -e
 
 # Configuration
 PROJECT_DIR="~/tiffinset"
-BRANCH="main"
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
 VM_NAME="tiffinset-app"
 ZONE="asia-south1-a"
 
