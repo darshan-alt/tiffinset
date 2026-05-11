@@ -1,0 +1,636 @@
+
+TiffinSet
+Complete Technical Spec + Build Playbook
+GCP  |  Gemini 2.5 Flash  |  Telegram-first  |  Google Antigravity  |  tiffinset.com
+May 2026  |  v3.0
+This document is the single source of truth for TiffinSet. It supersedes all previous versions. Key changes from v2: AI orchestration switched from Claude API to Gemini 2.5 Flash (same GCP project, lower cost, credits-eligible), build tool is Google Antigravity IDE, and all prompts are updated accordingly.
+
+Table of contents
+
+======================================================================
+1. INFRASTRUCTURE — WHAT IS DEPLOYED
+======================================================================
+
+| Resource        | Type               | Details                                                     | Cost                            |
+|-----------------|--------------------|-------------------------------------------------------------|---------------------------------|
+| VM              | GCP e2-small       | 2 vCPU, 2GB RAM, 20GB SSD, Ubuntu 24.04, asia-south1-a      | ~$10/mo (credits)               |
+| Static IP       | GCP reserved       | Permanent public IP attached to VM                          | Free (attached)                 |
+| Domain          | tiffinset.com      | Hostinger, A record: api.tiffinset.com → static IP          | ~Rs 900/year                    |
+| Reverse proxy   | Nginx              | TLS termination, proxy to localhost:3000                    | Free (on VM)                    |
+| SSL             | Let’s Encrypt      | Auto-renewed via Certbot                                    | Free                            |
+| Database        | PostgreSQL 16      | On VM, localhost:5432, user: tiffinset_admin, db: tiffinset | Free (on VM)                    |
+| Cache           | Redis 7            | On VM, localhost:6379, 256MB max, allkeys-lru               | Free (on VM)                    |
+| Secrets         | GCP Secret Manager | 6 secrets, VM service account has accessor role             | ~$0.50/mo                       |
+| AI orchestrator | Gemini 2.5 Flash   | Same GCP project, API key in Secret Manager                 | Credits / ~$0.15/M input tokens |
+| Speech-to-text  | OpenAI Whisper     | External API, handles Hindi/Hinglish/Tamil/English          | ~$0.006/min audio               |
+| Messaging       | Telegram Bot API   | @TiffinSetBot, webhook at /webhook/telegram                 | Free                            |
+| IDE             | Google Antigravity | Agent-first IDE, builds code via prompts                    | Free preview                    |
+
++--------------------------------------------------------------------+
+| Total monthly cost
+| ~$11/month all covered by GCP credits. Gemini API usage from the same GCP project may also be credit-eligible.
++--------------------------------------------------------------------+
+
+======================================================================
+2. SYSTEM ARCHITECTURE
+======================================================================
+
+2.1 Data flow
+-------------
+
+User sends voice note/text on Telegram → webhook POST to api.tiffinset.com/webhook/telegram → server returns 200 immediately → if voice: download .ogg from Telegram, send to Whisper, get text → look up sender in user_profiles → load conversation history from Redis → build role-specific system prompt → send to Gemini 2.5 Flash with function declarations → Gemini decides function calls (recipe search, YouTube, mock Swiggy) → execute functions, send results back as functionResponse → Gemini generates final text → route response to kitchen members by role → send via Telegram → log event, update state.
+
+2.2 Transport abstraction
+-------------------------
+
+All messaging platform code lives behind a transport interface. Core pipeline imports from src/transport/index.js. Currently points to src/transport/telegram.js. When WhatsApp is approved, add src/transport/whatsapp.js and change one config line.
+
+2.3 AI layer: Gemini 2.5 Flash
+------------------------------
+
+Gemini is the AI orchestrator. It uses function calling (tool use) to decide what actions to take. Key differences from Claude that affect the code:
+
+| Aspect                   | Gemini format                                                |
+|--------------------------|--------------------------------------------------------------|
+| API endpoint             | POST generativelanguage.googleapis.com/v1beta/models/gemini- |
+| Auth                     | API key as query parameter: ?key={GEMINI_API_KEY}            |
+| System prompt            | systemInstruction field in request body                      |
+| Conversation history     | contents[] array with role 'user' and 'model'                |
+| Tool definitions         | tools[].functionDeclarations[] with name, description, param |
+| Tool call in response    | candidate.content.parts[].functionCall.name and .args        |
+| Sending tool result back | role: 'user', parts[].functionResponse.name and .response    |
+| End of turn              | candidate.content.parts[].text (no functionCall = done)      |
+| Finish reason            | candidate.finishReason: 'STOP' (text) or absent (tool call p |
+
+======================================================================
+3. DATABASE SCHEMA
+======================================================================
+
+PostgreSQL 16 on VM at localhost:5432. Database: tiffinset. User: tiffinset_admin. All 8 tables created.
+
+| Table               | Purpose                          | Key columns                                                  |
+|---------------------|----------------------------------|--------------------------------------------------------------|
+| kitchen_sessions    | One row per household            | kitchen_id (PK), owner_phone, address, household_size, dieta |
+| user_profiles       | One row per person               | phone (PK), kitchen_id (FK), role, display_name, language    |
+| recipe_overrides    | Per-user per-dish customizations | phone (FK), dish_name, exclusions, additions, substitutions  |
+| order_history       | Every grocery order              | kitchen_id (FK), items (JSONB), total_amount, status         |
+| event_log           | All routing events               | kitchen_id, event_type, source_phone, target_phones, payload |
+| menu_history        | Daily menu decisions             | kitchen_id (FK), menu_date, dishes (JSONB)                   |
+| shelf_life_rules    | Perishable expiry tracking       | item_category (PK), shelf_days, check_after                  |
+| youtube_video_cache | Cached video searches            | dish_name + language (PK), video_id, expires_at              |
+
+3.1 Redis key structure
+-----------------------
+
+| Key pattern            | TTL      | Purpose                                      |
+|------------------------|----------|----------------------------------------------|
+| otp:{chatId}           | 5 min    | OTP code + attempt counter                   |
+| cooldown:{chatId}      | 15 min   | OTP cooldown after max attempts              |
+| session:{chatId}       | 30 days  | Auth session: kitchenId, role, lastActive    |
+| onboarding:{chatId}    | 1 hour   | Multi-step onboarding state                  |
+| chat:{chatId}          | 24 hours | Gemini conversation history (max 40 entries) |
+| video:{dish}:{lang}    | 48 hours | YouTube search cache                         |
+| cart:{kitchenId}       | 2 hours  | Shopping cart state                          |
+| pending_order:{chatId} | 10 min   | Order awaiting OTP confirmation              |
+| rate:{chatId}          | 1 min    | Rate limit counter (max 20/min)              |
+| msgid:{messageId}      | 5 min    | Deduplication                                |
+
+======================================================================
+4. SECRETS AND CONFIGURATION
+======================================================================
+
+| Secret name          | Source                                                  | Used by                  |
+|----------------------|---------------------------------------------------------|--------------------------|
+| TELEGRAM_BOT_TOKEN   | BotFather (@TiffinSetBot)                               | Telegram transport layer |
+| GEMINI_API_KEY       | GCP Console → APIs & Services → Credentials             | Gemini AI orchestrator   |
+| WHISPER_API_KEY      | platform.openai.com                                     | Speech-to-text           |
+| YOUTUBE_API_KEY      | GCP Console (same project)                              | Recipe video search      |
+| WEBHOOK_VERIFY_TOKEN | Self-generated: tiffinset-verify-2026                   | Telegram webhook secret  |
+| DATABASE_URL         | postgres://tiffinset_admin:***@localhost:5432/tiffinset | PostgreSQL connection    |
+
+4.1 Config loader
+-----------------
+
+```
+// src/config.js
+const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
+const client = new SecretManagerServiceClient();
+async function getSecret(name) {
+  const projectId = await client.getProjectId();
+  const [version] = await client.accessSecretVersion({
+    name: `projects/${projectId}/secrets/${name}/versions/latest`
+  });
+  return version.payload.data.toString('utf8');
+}
+const config = {};
+async function init() {
+  config.TELEGRAM_BOT_TOKEN = await getSecret('TELEGRAM_BOT_TOKEN');
+  config.GEMINI_API_KEY = await getSecret('GEMINI_API_KEY');
+  config.WHISPER_API_KEY = await getSecret('WHISPER_API_KEY');
+  config.YOUTUBE_API_KEY = await getSecret('YOUTUBE_API_KEY');
+  config.WEBHOOK_VERIFY_TOKEN = await getSecret('WEBHOOK_VERIFY_TOKEN');
+  config.DATABASE_URL = await getSecret('DATABASE_URL');
+  config.ACTIVE_TRANSPORT = 'telegram';
+  return config;
+}
+module.exports = { init, config };
+```
+
+======================================================================
+5. GEMINI API — FUNCTION CALLING REFERENCE
+======================================================================
+
+This section is the implementation reference for the AI orchestrator. Every code prompt in the build playbook references this.
+
+5.1 Basic call structure
+------------------------
+
+```
+const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+async function callGemini(systemPrompt, contents, tools) {
+  const body = {
+    systemInstruction: { parts: [{ text: systemPrompt }] },
+    contents: contents,  // [{role:'user',parts:[{text:'...'}]}, {role:'model',parts:[{text:'...'}]}]
+    tools: tools ? [{ functionDeclarations: tools }] : undefined,
+  };
+  const res = await fetch(`${GEMINI_URL}?key=${config.GEMINI_API_KEY}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  const candidate = data.candidates[0];
+  const parts = candidate.content.parts;
+  // Check if Gemini wants to call a function
+  const fnCall = parts.find(p => p.functionCall);
+  if (fnCall) {
+    return {
+      type: 'function_call',
+      name: fnCall.functionCall.name,
+      args: fnCall.functionCall.args,
+      rawParts: parts  // may contain text + functionCall
+    };
+  }
+  // Text response
+  const text = parts.filter(p => p.text).map(p => p.text).join('');
+  return { type: 'text', text };
+}
+```
+
+5.2 Tool definition format
+--------------------------
+
+```
+const toolDefinitions = [
+  {
+    name: 'search_recipe',
+    description: 'Search for a recipe by dish name. Returns ingredients and steps.',
+    parameters: {
+      type: 'object',
+      properties: {
+        dish_name: { type: 'string', description: 'Name of the dish' },
+        servings: { type: 'integer', description: 'Number of servings' }
+      },
+      required: ['dish_name']
+    }
+  },
+  // ... 9 more tools with same structure
+];
+```
+
+5.3 Sending function results back
+---------------------------------
+
+```
+// After executing a function, send result back to Gemini:
+contents.push({
+  role: 'model',
+  parts: [{ functionCall: { name: 'search_recipe', args: { dish_name: 'paneer tikka' } } }]
+});
+contents.push({
+  role: 'user',
+  parts: [{
+    functionResponse: {
+      name: 'search_recipe',
+      response: { recipe: { ingredients: [...], steps: [...] } }
+    }
+  }]
+});
+// Then call Gemini again with updated contents
+```
+
+5.4 Agentic loop
+----------------
+
+```
+async function processMessage(chatId, text) {
+  const user = await getUser(chatId);
+  const kitchen = await getKitchen(user.kitchen_id);
+  const systemPrompt = buildSystemPrompt(user, kitchen);
+  const history = await loadHistory(chatId); // from Redis
+  history.push({ role: 'user', parts: [{ text }] });
+  let iterations = 0;
+  while (iterations < 5) {
+    const result = await callGemini(systemPrompt, history, toolDefinitions);
+    if (result.type === 'text') {
+      history.push({ role: 'model', parts: [{ text: result.text }] });
+      await saveHistory(chatId, history);
+      return result.text;
+    }
+    // Function call: execute and feed result back
+    history.push({ role: 'model', parts: result.rawParts });
+    const fnResult = await executeTool(result.name, result.args, { chatId, kitchen });
+    history.push({
+      role: 'user',
+      parts: [{ functionResponse: { name: result.name, response: fnResult } }]
+    });
+    iterations++;
+  }
+  await saveHistory(chatId, history);
+  return 'Processing mein thoda time lag raha hai. Thodi der mein try karo.';
+}
+```
+
+======================================================================
+6. AUTHENTICATION
+======================================================================
+
+| Layer           | Mechanism                    | Details                                         |
+|-----------------|------------------------------|-------------------------------------------------|
+| Webhook         | Telegram secret_token header | Set during setWebhook, checked in middleware    |
+| User identity   | OTP via Redis                | 6-digit, 5-min TTL, 3 attempts, 15-min cooldown |
+| Session         | Redis session:{chatId}       | 30-day TTL, refreshed on activity               |
+| High-value      | Extra OTP for orders >Rs 500 | Prevents accidental expensive COD orders        |
+| Swiggy (future) | OAuth 2.0                    | Built but mock mode until MCP access granted    |
+
+6.1 Role-based access
+---------------------
+
+| Action                  | Owner | Contributor       | Cook |
+|-------------------------|-------|-------------------|------|
+| Set daily menu          | Yes   | No (suggest only) | No   |
+| Approve orders          | Yes   | No                | No   |
+| View prices/brands      | Yes   | No                | No   |
+| Suggest dishes          | Yes   | Yes               | No   |
+| Receive recipes + video | Yes   | Yes               | Yes  |
+| Report shortages        | No    | No                | Yes  |
+| Invite/remove members   | Yes   | No                | No   |
+
+======================================================================
+7. CORE PIPELINE + TOOLS
+======================================================================
+
+| Stage            | Action                          | On failure                 |
+|------------------|---------------------------------|----------------------------|
+| 1. Receive       | Webhook POST from Telegram      | Return 200, skip malformed |
+| 2. Verify        | Check secret_token header       | Reject 403                 |
+| 3. Deduplicate   | Check msgid:{id} in Redis       | Skip if seen               |
+| 4. Rate limit    | Check rate:{chatId}             | Throttle if >20/min        |
+| 5. Authenticate  | Check session/onboarding/reauth | Route to auth flow         |
+| 6. Transcribe    | If voice: download, Whisper STT | Ask to resend or type      |
+| 7. Process       | Send to Gemini with tools       | Retry once, then error     |
+| 8. Execute tools | Run function calls              | Return error to Gemini     |
+| 9. Route         | Send to kitchen members by role | Retry with backoff         |
+| 10. Log          | Write event_log, update Redis   | Warn but do not block      |
+
+7.1 Gemini tool definitions
+---------------------------
+
+| Tool                    | Purpose                                                |
+|-------------------------|--------------------------------------------------------|
+| search_recipe           | Find recipe using Gemini knowledge (no external API)   |
+| search_youtube_video    | YouTube Data API v3 with dual-layer cache              |
+| search_instamart        | Mock Indian brand data with INR prices                 |
+| add_to_cart             | Add to Redis cart:{kitchenId}                          |
+| view_cart               | Show cart + total from Redis                           |
+| place_order             | Idempotency key + OTP for >500 + save to order_history |
+| get_recipe_overrides    | PostgreSQL recipe_overrides + global overrides         |
+| save_recipe_override    | Upsert with ON CONFLICT                                |
+| get_order_history       | Query for reorder prediction                           |
+| route_to_kitchen_member | Send message to another role via transport             |
+
+7.2 Event routing
+-----------------
+
+| Event           | Triggered by               | Routed to                                            |
+|-----------------|----------------------------|------------------------------------------------------|
+| menu_set        | Owner sets menu            | Cook(s) get recipe + video, contributors get summary |
+| dish_suggested  | Contributor suggests       | Owner gets approval request                          |
+| shortage_report | Cook reports missing items | Owner gets brand options                             |
+| order_confirmed | Owner confirms order       | Cook(s) get ETA                                      |
+| topup_suggested | Cart below free delivery   | Owner gets suggestion                                |
+| leftover_check  | Cron 8 AM IST              | Cook(s) get check-in                                 |
+
+======================================================================
+8. BUILD PLAYBOOK — ANTIGRAVITY PROMPTS
+======================================================================
+
+Open your TiffinSet project in Google Antigravity. Make sure AGENTS.md is in the project root (see Section 8.0 below). Each purple box is a prompt to paste into the Antigravity agent. Prompts can be run in Editor View sidebar or Manager View for parallel execution.
+
+8.0 AGENTS.md
+-------------
+
+Create this file in your project root before running any prompts:
+
+```
+# TiffinSet — Project Context
+## What this is
+Voice-first kitchen management bot on Telegram (WhatsApp-ready).
+## Tech stack
+Node.js 20, Express, PostgreSQL 16 (localhost), Redis 7 (localhost),
+GCP Secret Manager, Telegram Bot API, Gemini 2.5 Flash, OpenAI Whisper,
+YouTube Data API v3. Domain: api.tiffinset.com. GCP e2-small in asia-south1-a.
+## Architecture
+Transport abstraction: src/transport/telegram.js (active), whatsapp.js (future).
+Gemini agentic loop with 10 function declarations.
+Shared kitchen session: owner, cook, contributor linked by kitchen_id.
+Auth: secret_token webhook verify, OTP (Redis 5-min), session (Redis 30-day).
+## Database (8 tables)
+kitchen_sessions, user_profiles, recipe_overrides, order_history,
+event_log, menu_history, shelf_life_rules, youtube_video_cache
+## Secrets (GCP Secret Manager)
+TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, WHISPER_API_KEY, YOUTUBE_API_KEY,
+WEBHOOK_VERIFY_TOKEN, DATABASE_URL
+## Rules
+- All messaging through transport layer, never direct platform calls
+- Gemini function calling format (not Claude tool_use format)
+- Secrets from GCP Secret Manager, never hardcoded
+- User-facing messages in Hinglish (Hindi + English mix)
+```
+
+######################################################################
+  Phase 1: Project scaffold + Telegram webhook
+  Estimated time: 1-2 hours
+  Prerequisites: Infra deployed, AGENTS.md created
+######################################################################
+
+======================================================================
+>>> Antigravity Prompt: Scaffold the project
+======================================================================
+Read AGENTS.md for project context. Create the TiffinSet Node.js project:
+1. package.json with: express, pg, ioredis, @google-cloud/secret-manager, form-data, node-fetch, uuid, node-cron
+2. src/config.js - load 6 secrets from GCP Secret Manager: TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, WHISPER_API_KEY, YOUTUBE_API_KEY, WEBHOOK_VERIFY_TOKEN, DATABASE_URL. Set config.ACTIVE_TRANSPORT = 'telegram'
+3. src/db/pool.js - pg pool from config.DATABASE_URL (localhost PostgreSQL)
+4. src/db/redis.js - ioredis on localhost:6379
+5. src/transport/index.js - re-export active transport based on config.ACTIVE_TRANSPORT
+6. src/transport/telegram.js - implement: parseIncoming(body), downloadAudio(fileId), downloadImage(fileId), sendText(chatId, text), sendList(chatId, header, items) using inline_keyboard, sendButtons(chatId, text, buttons) using inline_keyboard, verifyWebhook(req) checking X-Telegram-Bot-Api-Secret-Token header. Use config.TELEGRAM_BOT_TOKEN for all Telegram API calls.
+7. src/middleware/rateLimit.js - 20/min per chatId via Redis
+8. src/middleware/dedup.js - skip duplicates via Redis msgid:{id} 5-min TTL
+9. src/index.js - Express app: GET /health (check pg + redis), POST /webhook/telegram (verify webhook, return 200 immediately, parse, handle message + callback_query, for callback_query call answerCallbackQuery)
+10. ecosystem.config.js for PM2
+11. .gitignore (node_modules, .env*, *.pem)
+12. Run npm install and initialize git
+======================================================================
+
++--------------------------------------------------------------------+
+| Deploy and test
+| git add -A && git commit -m 'phase 1' && git push
+| SSH into VM, git clone/pull, npm ci, pm2 start ecosystem.config.js
+| Register webhook: curl -X POST https://api.telegram.org/bot<TOKEN>/setWebhook -H 'Content-Type: application/json' -d '{"url":"https://api.tiffinset.com/webhook/telegram","secret_token":"tiffinset-verify-2026","allowed_updates":["message","callback_query"]}'
+| Message @TiffinSetBot. Check pm2 logs.
++--------------------------------------------------------------------+
+
+######################################################################
+  Phase 2: Whisper speech-to-text
+  Estimated time: 1 hour
+  Prerequisites: Phase 1 working
+######################################################################
+
+======================================================================
+>>> Antigravity Prompt: Whisper integration
+======================================================================
+Create src/ai/whisper.js: export transcribeAudio(audioBuffer).
+POST OGG buffer to https://api.openai.com/v1/audio/transcriptions using form-data.
+model: 'whisper-1'. Do NOT set language param - auto-detect handles Hindi, Tamil, Hinglish, English.
+Return text. Retry once on failure. Log duration in ms.
+Use config.WHISPER_API_KEY.
+Wire into webhook handler: when message type is 'voice',
+call transport.downloadAudio(fileId) then transcribeAudio(buffer),
+then send back: transport.sendText(chatId, 'Maine suna: "' + text + '"').
+======================================================================
+
+######################################################################
+  Phase 3: Authentication + onboarding
+  Estimated time: 3-4 hours
+  Prerequisites: Phase 2 working
+######################################################################
+
+======================================================================
+>>> Antigravity Prompt: OTP + sessions + onboarding + offboarding
+======================================================================
+Build the complete auth system. Create:
+src/kitchen/auth.js:
+generateOTP(chatId) - 6-digit, Redis otp:{chatId} 5-min TTL, 3 attempts. After 3 wrong: set cooldown:{chatId} 15-min TTL.
+verifyOTP(chatId, input) - check Redis, handle expired/wrong/max/cooldown
+sendOTP(chatId, code) - via transport.sendText
+createSession(chatId, kitchenId, role) - Redis session:{chatId} 30-day TTL
+checkSession(chatId) - return {valid, kitchenId, role} or reason
+refreshSession(chatId) - update lastActive, reset TTL
+destroySession(chatId) - delete from Redis
+src/middleware/auth.js:
+authenticateUser(chatId) - check onboarding state, session, 30-day expiry, reauth flow
+requireHighValueAuth(chatId, total, threshold=500) - extra OTP for expensive orders
+src/kitchen/onboarding.js:
+handleOnboarding(chatId, text) - Redis state machine:
+Owner: OTP → verify → household size → address → dietary prefs → create kitchen_sessions + user_profiles
+Cook invite: owner provides chatId → OTP to invitee → verify → language → link to kitchen
+Contributor: same but skip language
+handleRemoveMember - soft delete, destroy session, notify
+handleSelfDelete - OTP confirm, hard delete, cascade if owner
+Wire authenticateUser into webhook POST as first step before processing.
+All messaging via transport layer. All DB via src/db/pool.js.
+======================================================================
+
+######################################################################
+  Phase 4: Gemini AI orchestrator
+  Estimated time: 3-4 hours
+  Prerequisites: Phase 3 working
+######################################################################
+
+======================================================================
+>>> Antigravity Prompt: Gemini function-calling orchestrator
+======================================================================
+Build the Gemini AI orchestrator. IMPORTANT: Use Gemini API format, not Claude format.
+src/ai/gemini.js: callGemini(systemPrompt, contents, tools)
+POST to https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={config.GEMINI_API_KEY}
+Request body: { systemInstruction: {parts:[{text: systemPrompt}]}, contents: contents, tools: [{functionDeclarations: tools}] }
+Parse response: data.candidates[0].content.parts
+If any part has functionCall: return {type:'function_call', name, args, rawParts}
+If only text parts: return {type:'text', text: joined text}
+Retry once on 5xx. Log input/output token counts and duration.
+src/ai/prompts.js: buildSystemPrompt(profile, kitchen)
+Owner: help with menu, recipes, YouTube videos, grocery search, brand comparison, ordering. Show prices. Respond in Hinglish.
+Cook: share recipes + videos in their language. Ask about shortages. No prices or budget info.
+Contributor: accept dish suggestions. Route to owner for approval.
+src/ai/tools.js: toolDefinitions as Gemini functionDeclarations format.
+10 tools: search_recipe, search_youtube_video, search_instamart, add_to_cart, view_cart, place_order, get_recipe_overrides, save_recipe_override, get_order_history, route_to_kitchen_member.
+Each has: name, description, parameters: {type:'object', properties:{...}, required:[...]}
+executeTool(name, args, context) dispatcher. search_recipe: use Gemini knowledge. search_instamart: mock data.
+src/ai/processor.js: processMessage(chatId, text)
+1. Get user profile + kitchen from PostgreSQL
+2. Load history from Redis chat:{chatId} (parse JSON, default [])
+3. Build system prompt
+4. Push {role:'user', parts:[{text}]} to history
+5. LOOP (max 5):
+Call callGemini(prompt, history, tools)
+If text: push {role:'model', parts:[{text}]} to history, save, return text
+If function_call: push {role:'model', parts: rawParts} to history,
+execute tool, push {role:'user', parts:[{functionResponse:{name,response}}]} to history,
+continue loop
+6. Save history to Redis (cap 40 entries, 24h TTL)
+Wire into webhook: after auth, call processMessage, send response via transport.
+Call refreshSession after successful processing.
+======================================================================
+
+######################################################################
+  Phase 5: Recipe engine + YouTube
+  Estimated time: 2 hours
+  Prerequisites: Phase 4 working
+######################################################################
+
+======================================================================
+>>> Antigravity Prompt: YouTube + recipe overrides
+======================================================================
+Create src/recipe/youtube.js: searchVideo(dishName, language)
+Check Redis video:{dishName}:{language} → PostgreSQL youtube_video_cache → YouTube Data API v3
+Query: dishName + 'recipe' + language name. Cache in both Redis (48h) + PostgreSQL (48h).
+On quota exceeded: return null (caller skips video).
+Create src/recipe/overrides.js:
+getOverrides(chatId, dishName) - query recipe_overrides for user + dish. Also get global (dish_name='*'). Merge.
+saveOverride(chatId, dishName, changes) - upsert with ON CONFLICT (phone, dish_name)
+Update tool implementations in src/ai/tools.js to use these modules.
+======================================================================
+
+######################################################################
+  Phase 6: Kitchen routing + events
+  Estimated time: 2-3 hours
+  Prerequisites: Phase 5 working
+######################################################################
+
+======================================================================
+>>> Antigravity Prompt: Multi-role routing + cron jobs
+======================================================================
+Create src/kitchen/routing.js:
+getKitchenMembers(kitchenId, role?) - query user_profiles
+routeEvent({type, kitchenId, sourcePhone, payload}) - dispatch:
+menu_set → send recipe+video to cooks, summary to contributors
+shortage_report → send brand options to owner
+order_confirmed → send items+ETA to cooks
+dish_suggested → send approval request to owner
+logEvent(kitchenId, type, source, targets, payload) - INSERT event_log
+All messaging via transport layer, respect each member language preference.
+Create src/kitchen/scheduler.js:
+Cron 8 AM IST: leftover check-in (perishables past check_after days from shelf_life_rules)
+Cron 9 AM IST: reorder nudge (items past 80% avg cycle in order_history)
+Call setupScheduler() from src/index.js on startup.
+======================================================================
+
+######################################################################
+  Phase 7: Mock orders + smart top-up
+  Estimated time: 2 hours
+  Prerequisites: Phase 6 working
+######################################################################
+
+======================================================================
+>>> Antigravity Prompt: Mock Swiggy + order flow + top-up
+======================================================================
+Create src/order/swiggy.js: mock mode with realistic data.
+searchProduct(kitchenId, item) - return 3 Indian brands with INR prices (Tata, Amul, Fortune, MDH, Ashirvaad, etc.)
+addToCart(kitchenId, productId, qty) - Redis cart:{kitchenId}
+viewCart(kitchenId) - return items + total
+placeOrder(kitchenId, chatId) -
+1. Call requireHighValueAuth if total >500
+2. Generate UUID idempotency key, store in Redis BEFORE placing
+3. ALWAYS show cart summary with confirm/cancel buttons FIRST
+4. On confirm: save to order_history, clear cart, return confirmation
+5. NEVER auto-place without explicit user confirmation
+Create src/order/topup.js: suggestTopUp(kitchenId, cartTotal, freeDeliveryMin)
+Query order_history for avg cycle per item. Score by overdue-ness.
+Suggest items past 80% cycle that fit the gap.
+======================================================================
+
+######################################################################
+  Phase 8: Tests + CI/CD + monitoring
+  Estimated time: 2-3 hours
+  Prerequisites: Phase 7 working
+######################################################################
+
+======================================================================
+>>> Antigravity Prompt: Tests + deploy pipeline + logging
+======================================================================
+Create Jest tests:
+tests/transport.test.js - mock Telegram API, verify parseIncoming, sendText
+tests/otp.test.js - generate, verify, expire, max attempts, cooldown
+tests/session.test.js - create, check, refresh, expire, destroy
+tests/routing.test.js - menu_set routes to cooks, shortage to owner
+tests/topup.test.js - suggest overdue items, skip cheap items
+tests/gemini.test.js - mock API, verify function_call parsing, agentic loop terminates
+Mock Redis and PostgreSQL. Use realistic test data.
+Create .github/workflows/ci.yml - on PR: lint + test with pg + redis services
+Create .github/workflows/deploy.yml - on push to main: SSH to GCP VM, pull, install, pm2 restart
+Create src/middleware/logger.js - structured JSON logging + GET /metrics endpoint
+Run all tests and fix any failures.
+======================================================================
+
++--------------------------------------------------------------------+
+| MVP complete
+| After Phase 8 you have a working system:
+| Voice or text to @TiffinSetBot triggers Gemini-powered recipe lookup + YouTube video
+| Multi-role kitchen: owner, cook, contributor with event routing
+| Mock grocery ordering with brand comparison and COD confirmation
+| OTP auth, sessions, rate limiting, deduplication
+| CI/CD, logging, tests, transport abstraction ready for WhatsApp
++--------------------------------------------------------------------+
+
+======================================================================
+9. USING ANTIGRAVITY MANAGER VIEW FOR PARALLEL BUILDS
+======================================================================
+
+After Phase 4, Phases 5, 6, and 7 are independent of each other. Use Antigravity Manager View to build them in parallel:
+
+Open Manager View (top-right toggle or Cmd+Shift+M).
+Dispatch Agent 1: paste the Phase 5 prompt (recipe + YouTube).
+Dispatch Agent 2: paste the Phase 6 prompt (routing + events).
+Dispatch Agent 3: paste the Phase 7 prompt (orders + top-up).
+Each agent creates Artifacts (task plan, implementation, diffs). Review each.
+Approve and merge when satisfied. Run tests. Deploy.
+
++--------------------------------------------------------------------+
+| Time savings
+| Phases 5-7 take ~6 hours sequentially. In parallel via Manager View: ~2-3 hours including review.
++--------------------------------------------------------------------+
+
+======================================================================
+10. SWITCHING TO WHATSAPP (WHEN META APPROVES)
+======================================================================
+
+Create src/transport/whatsapp.js implementing the same interface as telegram.js.
+Store 3 new secrets: WHATSAPP_TOKEN, PHONE_NUMBER_ID, APP_SECRET.
+Add HMAC middleware for WhatsApp webhook route.
+Add GET + POST /webhook/whatsapp routes.
+Register webhook in Meta dashboard.
+Create template messages for proactive features.
+Change config.ACTIVE_TRANSPORT to 'whatsapp' (or run both simultaneously).
+
++--------------------------------------------------------------------+
+| Zero business logic changes
+| Gemini orchestrator, recipe engine, kitchen routing, orders, database — all unchanged. Only the transport file changes.
++--------------------------------------------------------------------+
+
+======================================================================
+11. BACKUP AND RECOVERY
+======================================================================
+
+```
+# Daily backup cron (on VM)
+mkdir -p /home/ubuntu/backups
+crontab -e
+# Add:
+0 3 * * * pg_dump -U tiffinset_admin -h localhost tiffinset > /home/ubuntu/backups/tiffinset-$(date +\%Y\%m\%d).sql 2>&1
+0 4 * * * find /home/ubuntu/backups -name '*.sql' -mtime +7 -delete
+# VM snapshot (from laptop)
+gcloud compute disks snapshot tiffinset-app --zone=asia-south1-a --snapshot-names=tiffinset-snap-$(date +%Y%m%d)
+```
+
+End of document
+This is the single source of truth for TiffinSet v3.0. GCP infrastructure, Gemini 2.5 Flash AI, Telegram-first messaging, Google Antigravity IDE for building. All previous documents are superseded.
