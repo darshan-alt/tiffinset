@@ -31,6 +31,27 @@ app.get('/metrics', (req, res) => {
   res.status(200).json(getMetrics());
 });
 
+app.get('/auth/swiggy/callback', async (req, res) => {
+  const { code, state, error } = req.query;
+  
+  if (error) {
+    logError({}, 'swiggy_auth_error', { error });
+    return res.status(400).send(`Auth failed: ${error}`);
+  }
+
+  logInfo({}, 'swiggy_auth_callback', { code: code ? 'received' : 'missing', state });
+
+  // This is where we will eventually exchange the code for tokens
+  // and link the Swiggy account to a kitchen_id via the 'state' parameter.
+  
+  res.send(`
+    <div style="font-family: sans-serif; text-align: center; padding: 50px;">
+      <h1 style="color: #fc8019;">TiffinSet + Swiggy</h1>
+      <p>Connection successful! You can now close this window and go back to your bot.</p>
+    </div>
+  `);
+});
+
 app.post('/webhook/telegram', rateLimit, dedup, async (req, res) => {
   const messageId = req.body.message?.message_id || req.body.callback_query?.id;
   logInfo({}, 'won_dedup_race', { messageId });

@@ -19,6 +19,8 @@ const config = {
   DATABASE_URL: process.env.DATABASE_URL,
   ACTIVE_TRANSPORT: process.env.ACTIVE_TRANSPORT || 'telegram',
   REDIS_URL: process.env.REDIS_URL || 'redis://localhost:6379',
+  SWIGGY_CLIENT_ID: process.env.SWIGGY_CLIENT_ID,
+  SWIGGY_CLIENT_SECRET: process.env.SWIGGY_CLIENT_SECRET,
 };
 
 const secretNames = [
@@ -28,6 +30,8 @@ const secretNames = [
   'YOUTUBE_API_KEY',
   'WEBHOOK_VERIFY_TOKEN',
   'DATABASE_URL',
+  'SWIGGY_CLIENT_ID',
+  'SWIGGY_CLIENT_SECRET',
 ];
 
 export async function initConfig() {
