@@ -23,9 +23,21 @@ export async function authenticateUser(chatId) {
       await redis.setex(`reauth:${chatId}`, 600, 'pending');
     }
     return { status: 'reauth_required' };
-  } else {
-    return { status: 'unknown' };
   }
+
+  // Check database if no Redis session exists
+  const userRes = await pool.query(
+    'SELECT kitchen_id, role FROM user_profiles WHERE phone = $1',
+    [String(chatId)]
+  );
+
+  if (userRes.rows.length > 0) {
+    const user = userRes.rows[0];
+    await createSession(chatId, user.kitchen_id, user.role);
+    return { status: 'authenticated', kitchenId: user.kitchen_id, role: user.role };
+  }
+
+  return { status: 'unknown' };
 }
 
 export async function requireHighValueAuth(chatId, total, threshold = 500) {

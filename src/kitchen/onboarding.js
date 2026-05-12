@@ -36,6 +36,16 @@ export async function handleOnboarding(chatId, messageText) {
     state.data.householdSize = size;
     
     if (state.data.language === 'hinglish') {
+      await sendText(chatId, "Aapka address kya hai? (Delivery ke liye)");
+    } else {
+      await sendText(chatId, "What is your address? (For delivery)");
+    }
+    state.step = 'address';
+    await redis.setex(onboardingKey, 3600, JSON.stringify(state));
+  }
+  else if (state.step === 'address') {
+    state.data.address = messageText.trim();
+    if (state.data.language === 'hinglish') {
       await sendText(chatId, "Koi food restrictions? (e.g., vegetarian, no pork, allergies). Nahi ho toh 'none' type karein.");
     } else {
       await sendText(chatId, "Any food restrictions? (e.g., vegetarian, no pork, allergies). If none, type 'none'.");
@@ -53,15 +63,36 @@ export async function handleOnboarding(chatId, messageText) {
     const kitchenId = 'kitchen_' + String(chatId).slice(-8);
     
     try {
-      await pool.query(
-        'INSERT INTO kitchen_sessions (kitchen_id, owner_phone, household_size, dietary_prefs) VALUES ($1, $2, $3, $4)',
-        [kitchenId, String(chatId), state.data.householdSize, JSON.stringify(prefs)]
-      );
-      
-      await pool.query(
-        "INSERT INTO user_profiles (phone, kitchen_id, role, display_name, is_verified, language_code) VALUES ($1, $2, 'owner', 'Owner', true, $3)",
-        [String(chatId), kitchenId, state.data.language || 'english']
-      );
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        
+        await client.query(
+          `INSERT INTO kitchen_sessions (kitchen_id, owner_phone, household_size, address, dietary_prefs) 
+           VALUES ($1, $2, $3, $4, $5) 
+           ON CONFLICT (kitchen_id) DO UPDATE SET 
+             household_size = EXCLUDED.household_size, 
+             address = EXCLUDED.address, 
+             dietary_prefs = EXCLUDED.dietary_prefs`,
+          [kitchenId, String(chatId), state.data.householdSize, state.data.address || '', JSON.stringify(prefs)]
+        );
+        
+        await client.query(
+          `INSERT INTO user_profiles (phone, kitchen_id, role, display_name, is_verified, language_code) 
+           VALUES ($1, $2, 'owner', 'Owner', true, $3)
+           ON CONFLICT (phone) DO UPDATE SET 
+             kitchen_id = EXCLUDED.kitchen_id, 
+             language_code = EXCLUDED.language_code`,
+          [String(chatId), kitchenId, state.data.language || 'english']
+        );
+        
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      } finally {
+        client.release();
+      }
       
       await createSession(chatId, kitchenId, 'owner');
       await redis.del(onboardingKey);
