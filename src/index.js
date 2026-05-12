@@ -79,6 +79,18 @@ app.post('/webhook/telegram', rateLimit, dedup, async (req, res) => {
 
       if (!textInput) return;
 
+      if (textInput.startsWith('/start invite_')) {
+        const parts = textInput.split('_');
+        if (parts.length >= 3) {
+          const kitchenId = parts.slice(1, parts.length - 1).join('_');
+          const role = parts[parts.length - 1]; // 'cook' or 'contributor'
+          import('./kitchen/onboarding.js').then(({ handleDeepLinkInvite }) => {
+            handleDeepLinkInvite(parsed.chatId, kitchenId, role);
+          });
+          return;
+        }
+      }
+
       const auth = await authenticateUser(parsed.chatId);
 
       if (auth.status === 'onboarding') {
@@ -117,6 +129,7 @@ app.post('/webhook/telegram', rateLimit, dedup, async (req, res) => {
       }
 
       if (auth.status === 'unknown') {
+        if (textInput === '/start') textInput = 'Hello';
         await handleOnboarding(parsed.chatId, textInput);
         return;
       }
@@ -125,17 +138,15 @@ app.post('/webhook/telegram', rateLimit, dedup, async (req, res) => {
         // Handle /invite command
         if (textInput.startsWith('/invite ')) {
           const parts = textInput.split(' ');
-          if (parts.length === 3) {
-            const inviteePhone = parts[1];
-            const role = parts[2].toLowerCase(); // 'cook' or 'contributor'
+          if (parts.length === 2) {
+            const role = parts[1].toLowerCase(); // 'cook' or 'contributor'
             if (['cook', 'contributor'].includes(role)) {
-              import('./kitchen/onboarding.js').then(({ handleInvitation }) => {
-                handleInvitation(parsed.chatId, auth.kitchenId, inviteePhone, role);
-              });
+              const inviteLink = `https://t.me/TiffinSetBot?start=invite_${auth.kitchenId}_${role}`;
+              await sendText(parsed.chatId, `Share this link with your ${role}:\n${inviteLink}\n\nAs soon as they click it, they will be joined to your kitchen!`);
               return;
             }
           }
-          await sendText(parsed.chatId, "To invite someone, type: /invite <their_telegram_id> <cook|contributor>");
+          await sendText(parsed.chatId, "To invite someone, type: /invite <cook|contributor>");
           return;
         }
 

@@ -128,37 +128,36 @@ export async function handleOnboarding(chatId, messageText) {
       await createSession(chatId, state.data.kitchenId, 'cook');
       await redis.del(onboardingKey);
       await sendText(chatId, "Welcome to TiffinSet!");
-      await sendText(state.data.invitedBy, "The cook has successfully joined the kitchen.");
     } catch (err) {
       logError({ chatId }, 'cook_join_db_error', err);
     }
   }
 }
 
-export async function handleInvitation(ownerChatId, kitchenId, inviteeChatId, role) {
+export async function handleDeepLinkInvite(chatId, kitchenId, role) {
   try {
-    const existing = await pool.query('SELECT phone FROM user_profiles WHERE phone = $1', [String(inviteeChatId)]);
+    const existing = await pool.query('SELECT phone FROM user_profiles WHERE phone = $1', [String(chatId)]);
     if (existing.rows.length > 0) {
-      await sendText(ownerChatId, "Yeh user pehle se TiffinSet par hai.");
+      await sendText(chatId, "You are already registered on TiffinSet.");
       return;
     }
     
-    const ownerNameRes = await pool.query('SELECT display_name FROM user_profiles WHERE phone = $1', [String(ownerChatId)]);
-    const ownerName = ownerNameRes.rows[0]?.display_name || 'Kitchen Owner';
-    
-    const otpRes = await generateOTP(inviteeChatId);
-    if (otpRes.error) {
-      await sendText(ownerChatId, "Kuch der baad try karein.");
-      return;
+    // We bypass OTP because deep link itself is the invite.
+    if (role === 'cook') {
+      await sendText(chatId, "Welcome! What is your preferred language? (English/Hindi/Kannada/Tamil/Telugu)");
+      const onboardingKey = `onboarding:${chatId}`;
+      const state = { step: 'invite_language', data: { kitchenId, role } };
+      await redis.setex(onboardingKey, 3600, JSON.stringify(state));
+    } else if (role === 'contributor') {
+      await pool.query(
+        "INSERT INTO user_profiles (phone, kitchen_id, role, display_name, is_verified) VALUES ($1, $2, 'contributor', 'Contributor', true)",
+        [String(chatId), kitchenId]
+      );
+      await createSession(chatId, kitchenId, 'contributor');
+      await sendText(chatId, "Welcome to TiffinSet! You are now joined to the kitchen.");
     }
-    
-    await sendText(inviteeChatId, `${ownerName} ne aapko TiffinSet mein ${role} ke roop mein add kiya hai. Verify code: ${otpRes.code}`);
-    await redis.setex(`onboarding:${inviteeChatId}`, 3600, JSON.stringify({
-      step: 'invite_verify',
-      data: { kitchenId, role, invitedBy: ownerChatId }
-    }));
-    await sendText(ownerChatId, "Invitation bhej diya. Unhe verify karna hoga.");
   } catch (err) {
-    logError({ chatId: ownerChatId }, 'handle_invitation_error', err);
+    logError({ chatId }, 'handle_deeplink_invite_error', err);
+    await sendText(chatId, "Failed to process invite link. Please try again.");
   }
 }
