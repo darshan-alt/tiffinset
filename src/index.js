@@ -122,6 +122,23 @@ app.post('/webhook/telegram', rateLimit, dedup, async (req, res) => {
       }
 
       if (auth.status === 'authenticated') {
+        // Handle /invite command
+        if (textInput.startsWith('/invite ')) {
+          const parts = textInput.split(' ');
+          if (parts.length === 3) {
+            const inviteePhone = parts[1];
+            const role = parts[2].toLowerCase(); // 'cook' or 'contributor'
+            if (['cook', 'contributor'].includes(role)) {
+              import('./kitchen/onboarding.js').then(({ handleInvitation }) => {
+                handleInvitation(parsed.chatId, auth.kitchenId, inviteePhone, role);
+              });
+              return;
+            }
+          }
+          await sendText(parsed.chatId, "To invite someone, type: /invite <their_telegram_id> <cook|contributor>");
+          return;
+        }
+
         try {
           const response = await processMessage(parsed.chatId, textInput);
           await sendText(parsed.chatId, response);
