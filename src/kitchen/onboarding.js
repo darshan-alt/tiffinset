@@ -21,10 +21,10 @@ export async function handleOnboarding(chatId, messageText) {
   else if (state.step === 'language') {
     let lang = messageText.trim().toLowerCase();
     if (lang === 'hinglish' || lang === 'hindi') {
-      state.data.language = 'hinglish';
+      state.data.language = 'hi';
       await sendText(chatId, "Ghar mein kitne log hain? (Enter a number)");
     } else {
-      state.data.language = 'english';
+      state.data.language = 'en';
       await sendText(chatId, "How many people are in your household? (Enter a number)");
     }
     state.step = 'household_size';
@@ -35,7 +35,7 @@ export async function handleOnboarding(chatId, messageText) {
     if (isNaN(size)) size = 4;
     state.data.householdSize = size;
     
-    if (state.data.language === 'hinglish') {
+    if (state.data.language === 'hi') {
       await sendText(chatId, "Aapka address kya hai? (Delivery ke liye)");
     } else {
       await sendText(chatId, "What is your address? (For delivery)");
@@ -45,7 +45,7 @@ export async function handleOnboarding(chatId, messageText) {
   }
   else if (state.step === 'address') {
     state.data.address = messageText.trim();
-    if (state.data.language === 'hinglish') {
+    if (state.data.language === 'hi') {
       await sendText(chatId, "Koi food restrictions? (e.g., vegetarian, no pork, allergies). Nahi ho toh 'none' type karein.");
     } else {
       await sendText(chatId, "Any food restrictions? (e.g., vegetarian, no pork, allergies). If none, type 'none'.");
@@ -83,7 +83,7 @@ export async function handleOnboarding(chatId, messageText) {
            ON CONFLICT (phone) DO UPDATE SET 
              kitchen_id = EXCLUDED.kitchen_id, 
              language_code = EXCLUDED.language_code`,
-          [String(chatId), kitchenId, state.data.language || 'english']
+          [String(chatId), kitchenId, state.data.language || 'en']
         );
         
         await client.query('COMMIT');
@@ -97,7 +97,7 @@ export async function handleOnboarding(chatId, messageText) {
       await createSession(chatId, kitchenId, 'owner');
       await redis.del(onboardingKey);
       
-      if (state.data.language === 'hinglish') {
+      if (state.data.language === 'hi') {
         await sendText(chatId, "Setup complete! 🎉 Ab aap menu set kar sakte hain. Voice note mein batao aaj kya banana hai!");
       } else {
         await sendText(chatId, "Setup complete! 🎉 You can now manage your kitchen. Send a voice note or message to tell me what to cook today!");

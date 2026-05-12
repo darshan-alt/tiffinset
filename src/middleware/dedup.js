@@ -1,5 +1,5 @@
 import redis from '../db/redis.js';
-import { logInfo } from './logger.js';
+import { logInfo, logError } from './logger.js';
 
 export default async function dedup(req, res, next) {
   const body = req.body;

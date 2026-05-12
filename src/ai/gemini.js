@@ -2,7 +2,7 @@ import fetch from 'node-fetch';
 import config from '../config.js';
 import { logInfo, logError, incrementMetric } from '../middleware/logger.js';
 
-const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash:generateContent';
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 

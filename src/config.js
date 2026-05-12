@@ -21,6 +21,7 @@ const config = {
   REDIS_URL: process.env.REDIS_URL || 'redis://localhost:6379',
   SWIGGY_CLIENT_ID: process.env.SWIGGY_CLIENT_ID,
   SWIGGY_CLIENT_SECRET: process.env.SWIGGY_CLIENT_SECRET,
+  METRICS_TOKEN: process.env.METRICS_TOKEN,
 };
 
 const secretNames = [

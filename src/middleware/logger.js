@@ -1,22 +1,20 @@
-// ── Structured JSON Logger + In-Memory Metrics ─────────────────────
+// ── Structured JSON Logger + Redis-Backed Metrics ──────────────────
+import redis from '../db/redis.js';
 
 const startTime = Date.now();
+const METRIC_PREFIX = 'tiffinset:metric:';
 
-// In-memory counters
-const counters = {
-  messagesReceived: 0,
-  messagesSent: 0,
-  whisperCalls: 0,
-  geminiCalls: 0,
-  errors: 0,
-  ordersPlaced: 0,
-};
+const METRIC_NAMES = [
+  'messagesReceived',
+  'messagesSent',
+  'whisperCalls',
+  'geminiCalls',
+  'errors',
+  'ordersPlaced',
+];
 
 /**
  * Log a structured info event.
- * @param {{ chatId?: string, kitchenId?: string, role?: string }} context
- * @param {string} event  – event name, e.g. 'webhook_received'
- * @param {object} data   – arbitrary payload fields
  */
 export function logInfo(context, event, data = {}) {
   const entry = {
@@ -33,12 +31,9 @@ export function logInfo(context, event, data = {}) {
 
 /**
  * Log a structured error event.
- * @param {{ chatId?: string, kitchenId?: string, role?: string }} context
- * @param {string} event  – event name, e.g. 'webhook_error'
- * @param {Error} error
  */
 export function logError(context, event, error) {
-  counters.errors++;
+  incrementMetric('errors');
   const entry = {
     timestamp: new Date().toISOString(),
     level: 'error',
@@ -53,22 +48,29 @@ export function logError(context, event, error) {
 }
 
 /**
- * Increment a named counter.
- * @param {'messagesReceived'|'messagesSent'|'whisperCalls'|'geminiCalls'|'errors'|'ordersPlaced'} name
- * @param {number} n – amount to add (default 1)
+ * Increment a named counter in Redis (shared across PM2 workers).
+ * Fire-and-forget — never blocks the caller, never throws.
  */
 export function incrementMetric(name, n = 1) {
-  if (name in counters) {
-    counters[name] += n;
-  }
+  if (!METRIC_NAMES.includes(name)) return;
+  redis.incrby(`${METRIC_PREFIX}${name}`, n).catch(() => {});
 }
 
 /**
- * Return current counters + uptime.
+ * Return aggregated counters + uptime.
  */
-export function getMetrics() {
-  return {
-    ...counters,
-    uptimeSeconds: Math.floor((Date.now() - startTime) / 1000),
-  };
+export async function getMetrics() {
+  const result = { uptimeSeconds: Math.floor((Date.now() - startTime) / 1000) };
+  try {
+    const values = await Promise.all(
+      METRIC_NAMES.map((name) => redis.get(`${METRIC_PREFIX}${name}`))
+    );
+    METRIC_NAMES.forEach((name, i) => {
+      result[name] = Number(values[i]) || 0;
+    });
+  } catch (err) {
+    for (const name of METRIC_NAMES) result[name] = 0;
+    result.metricsError = err.message;
+  }
+  return result;
 }

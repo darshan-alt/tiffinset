@@ -1,6 +1,7 @@
 import redis from '../db/redis.js';
 import pool from '../db/pool.js';
 import config from '../config.js';
+import { logInfo, logError } from '../middleware/logger.js';
 
 const REDIS_TTL = 172800; // 48 hours in seconds
 
@@ -22,7 +23,7 @@ export async function searchVideo(dishName, language = 'hi') {
       return JSON.parse(cached);
     }
   } catch (err) {
-    console.warn('[youtube] Redis GET error, continuing:', err.message);
+    logError({}, 'youtube_redis_get_error', err);
   }
 
   // ── 2. PostgreSQL cache ───────────────────────────────────────────
@@ -48,13 +49,13 @@ export async function searchVideo(dishName, language = 'hi') {
       try {
         await redis.setex(redisKey, REDIS_TTL, JSON.stringify(result));
       } catch (err) {
-        console.warn('[youtube] Redis SETEX error (backfill):', err.message);
+        logError({}, 'youtube_redis_backfill_error', err);
       }
 
       return result;
     }
   } catch (err) {
-    console.warn('[youtube] PostgreSQL cache lookup error:', err.message);
+    logError({}, 'youtube_pg_cache_error', err);
   }
 
   // ── 3. YouTube Data API v3 ────────────────────────────────────────
@@ -78,23 +79,22 @@ export async function searchVideo(dishName, language = 'hi') {
 
     if (!res.ok) {
       const body = await res.text();
-      // Detect quota exceeded
       if (res.status === 403 && body.includes('quotaExceeded')) {
-        console.warn('[youtube] Quota exceeded — returning null');
+        logInfo({}, 'youtube_quota_exceeded', { query });
         return null;
       }
-      console.warn(`[youtube] API error ${res.status}: ${body}`);
+      logError({}, 'youtube_api_error', new Error(`status=${res.status} body=${body}`));
       return null;
     }
 
     data = await res.json();
   } catch (err) {
-    console.warn('[youtube] Fetch error:', err.message);
+    logError({}, 'youtube_fetch_error', err);
     return null;
   }
 
   if (!data.items || data.items.length === 0) {
-    console.warn('[youtube] No results for:', query);
+    logInfo({}, 'youtube_no_results', { query });
     return null;
   }
 
@@ -112,7 +112,7 @@ export async function searchVideo(dishName, language = 'hi') {
   try {
     await redis.setex(redisKey, REDIS_TTL, JSON.stringify(result));
   } catch (err) {
-    console.warn('[youtube] Redis SETEX error:', err.message);
+    logError({}, 'youtube_redis_setex_error', err);
   }
 
   // ── Cache in PostgreSQL ───────────────────────────────────────────
@@ -130,7 +130,7 @@ export async function searchVideo(dishName, language = 'hi') {
       [dishName, language, result.videoId, result.url, result.title, result.channel, result.thumbnail]
     );
   } catch (err) {
-    console.warn('[youtube] PostgreSQL INSERT error:', err.message);
+    logError({}, 'youtube_pg_insert_error', err);
   }
 
   return result;

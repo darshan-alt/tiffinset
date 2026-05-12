@@ -33,20 +33,26 @@ export function parseIncoming(body) {
   return null;
 }
 
-export async function downloadAudio(fileId) {
+async function fetchTelegramFile(fileId) {
   const response = await fetch(`${getApiUrl()}/getFile?file_id=${fileId}`);
-  const { result } = await response.json();
-  const fileUrl = `https://api.telegram.org/file/bot${config.TELEGRAM_BOT_TOKEN}/${result.file_path}`;
+  const data = await response.json();
+  if (!data.ok || !data.result?.file_path) {
+    throw new Error(`Telegram getFile failed: ${data.description || 'no file_path'}`);
+  }
+  const fileUrl = `https://api.telegram.org/file/bot${config.TELEGRAM_BOT_TOKEN}/${data.result.file_path}`;
   const fileResponse = await fetch(fileUrl);
+  if (!fileResponse.ok) {
+    throw new Error(`Telegram file download failed: ${fileResponse.status}`);
+  }
   return Buffer.from(await fileResponse.arrayBuffer());
 }
 
+export async function downloadAudio(fileId) {
+  return fetchTelegramFile(fileId);
+}
+
 export async function downloadImage(fileId) {
-  const response = await fetch(`${getApiUrl()}/getFile?file_id=${fileId}`);
-  const { result } = await response.json();
-  const fileUrl = `https://api.telegram.org/file/bot${config.TELEGRAM_BOT_TOKEN}/${result.file_path}`;
-  const fileResponse = await fetch(fileUrl);
-  return Buffer.from(await fileResponse.arrayBuffer());
+  return fetchTelegramFile(fileId);
 }
 
 export async function sendText(chatId, text) {
@@ -56,7 +62,6 @@ export async function sendText(chatId, text) {
     body: JSON.stringify({
       chat_id: chatId,
       text: text,
-      parse_mode: 'Markdown',
     }),
   });
   if (!res.ok) {
