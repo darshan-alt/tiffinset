@@ -8,11 +8,17 @@ export default async function dedup(req, res, next) {
   if (!messageId) return next();
 
   const key = `msgid:${messageId}`;
-  const isDuplicate = await redis.set(key, '1', 'EX', 300, 'NX');
+  try {
+    // ioredis returns 'OK' on success with NX, or null if key exists
+    const result = await redis.set(key, '1', 'EX', 300, 'NX');
 
-  if (!isDuplicate) {
-    logInfo({}, 'duplicate_message', { messageId });
-    return res.status(200).send('Duplicate');
+    if (result !== 'OK') {
+      logInfo({}, 'duplicate_message_dropped', { messageId, redisResult: result });
+      return res.status(200).send('Duplicate');
+    }
+  } catch (err) {
+    // If Redis fails, we prefer processing the message over dropping it
+    logError({}, 'dedup_redis_error', err);
   }
 
   next();
