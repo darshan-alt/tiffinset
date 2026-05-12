@@ -1,15 +1,20 @@
 import fetch from 'node-fetch';
 import FormData from 'form-data';
 import config from '../config.js';
+import { logInfo, logError } from '../middleware/logger.js';
 
 export async function transcribeAudio(audioBuffer) {
   const start = Date.now();
   
-  const formData = new FormData();
-  formData.append('file', audioBuffer, { filename: 'audio.ogg', contentType: 'audio/ogg' });
-  formData.append('model', 'whisper-1');
+  const createFormData = () => {
+    const formData = new FormData();
+    formData.append('file', audioBuffer, { filename: 'voice.ogg', contentType: 'audio/ogg' });
+    formData.append('model', 'whisper-1');
+    return formData;
+  };
 
-  async function attempt() {
+  const attempt = async () => {
+    const formData = createFormData();
     const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
       method: 'POST',
       headers: {
@@ -20,31 +25,31 @@ export async function transcribeAudio(audioBuffer) {
     });
 
     if (!response.ok) {
-      const error = await response.json();
-      throw new Error(`Whisper API error: ${error.error?.message || response.statusText}`);
+      const errorText = await response.text();
+      throw new Error(`Whisper API error: ${response.status} - ${errorText}`);
     }
 
     return response.json();
-  }
+  };
 
+  const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+  let data;
   try {
-    let result;
-    try {
-      result = await attempt();
-    } catch (e) {
-      console.warn('Whisper API first attempt failed, retrying...', e.message);
-      result = await attempt();
-    }
-
-    const duration = Date.now() - start;
-    console.log(`Whisper transcription took ${duration}ms`);
-    return result.text;
+    data = await attempt();
   } catch (error) {
-    console.error('Whisper transcription failed:', error);
-    throw error;
+    logInfo({}, 'whisper_retry', { reason: error.message });
+    await delay(2000);
+    try {
+      data = await attempt();
+    } catch (retryError) {
+      throw new Error(`Whisper transcription failed after retry. Details: ${retryError.message}`);
+    }
   }
-}
 
-export default {
-  transcribeAudio,
-};
+  const duration = Date.now() - start;
+  const text = data.text;
+  logInfo({}, 'whisper_transcription_complete', { duration, textLength: text.length });
+  
+  return text;
+}
