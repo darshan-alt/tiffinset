@@ -32,7 +32,13 @@ app.get('/metrics', (req, res) => {
 });
 
 app.post('/webhook/telegram', rateLimit, dedup, async (req, res) => {
+  const messageId = req.body.message?.message_id || req.body.callback_query?.id;
+  logInfo({}, 'won_dedup_race', { messageId });
+
   if (!verifyWebhook(req)) {
+    logError({}, 'webhook_unauthorized', { 
+      receivedToken: req.headers['x-telegram-bot-api-secret-token'] ? 'present' : 'missing' 
+    });
     return res.status(403).send('Unauthorized');
   }
 
@@ -45,7 +51,7 @@ app.post('/webhook/telegram', rateLimit, dedup, async (req, res) => {
     if (parsed) {
       incrementMetric('messagesReceived');
       const ctx = { chatId: String(parsed.chatId) };
-      logInfo(ctx, 'webhook_received', { messageType: parsed.type });
+      logInfo(ctx, 'webhook_received', { messageType: parsed.type, text: parsed.text || parsed.data || 'media' });
 
       let textInput = '';
       let isVoice = false;

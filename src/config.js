@@ -32,14 +32,13 @@ const secretNames = [
 
 export async function initConfig() {
   if (process.env.NODE_ENV === 'production') {
-    try {
-      for (const name of secretNames) {
+    for (const name of secretNames) {
+      try {
         config[name] = await getSecret(name);
+      } catch (error) {
+        console.error(`Error loading secret ${name}:`, error);
+        throw new Error(`Failed to load critical secret: ${name}`);
       }
-    } catch (error) {
-      console.error('Error loading secrets from Secret Manager:', error);
-      // In production, we might want to fail fast if secrets are missing
-      if (process.env.STRICT_CONFIG === 'true') throw error;
     }
   }
   return config;
