@@ -7,13 +7,16 @@ export default async function dedup(req, res, next) {
 
   if (!messageId) return next();
 
-  const key = `msgid:${messageId}`;
+  const key = `tiffinset:msg:${messageId}`;
   try {
-    // ioredis returns 'OK' on success with NX, or null if key exists
     const result = await redis.set(key, '1', 'EX', 300, 'NX');
 
     if (result !== 'OK') {
-      logInfo({}, 'duplicate_message_dropped', { messageId, redisResult: result });
+      logInfo({}, 'duplicate_message_dropped', { 
+        messageId, 
+        redisResult: result,
+        chatId: body.message?.chat?.id || body.callback_query?.message?.chat?.id
+      });
       return res.status(200).send('Duplicate');
     }
   } catch (err) {
