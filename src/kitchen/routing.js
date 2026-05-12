@@ -3,7 +3,7 @@ import { sendText } from '../transport/index.js';
 import { logError } from '../middleware/logger.js';
 
 export async function getKitchenMembers(kitchenId, role = null) {
-  let query = 'SELECT phone, role, display_name, language FROM user_profiles WHERE kitchen_id = $1';
+  let query = 'SELECT phone, role, display_name, language_code FROM user_profiles WHERE kitchen_id = $1';
   let params = [kitchenId];
   if (role) {
     query += ' AND role = $2';

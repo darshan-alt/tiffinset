@@ -49,10 +49,11 @@ export async function searchProduct(kitchenId, itemName, quantity) {
   const cached = await redis.get(cacheKey);
   if (cached) return JSON.parse(cached);
 
-  const lower = itemName.toLowerCase();
+  const lower = itemName.toLowerCase().trim();
+  const tokens = lower.split(/\s+/).filter(Boolean);
   let matched = [];
   for (const [key, products] of Object.entries(MOCK_PRODUCTS)) {
-    if (lower.includes(key) || key.includes(lower)) {
+    if (tokens.includes(key) || lower === key) {
       matched = products;
       break;
     }
@@ -112,17 +113,10 @@ export async function placeOrder(kitchenId, ownerChatId) {
   const idempotencyKey = `idempotency:${orderId}`;
   await redis.setex(idempotencyKey, 300, 'processing');
 
-  try {
-    await pool.query(
-      'INSERT INTO order_history (order_id, kitchen_id, items, total_amount, delivery_fee, free_delivery, swiggy_order_id, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
-      [orderId, kitchenId, JSON.stringify(cartData.items), cartData.total, cartData.deliveryFee, cartData.deliveryFee === 0, orderId, 'placed']
-    );
-  } catch (e) {
-    await pool.query(
-      'INSERT INTO order_history (order_id, kitchen_id, items, total, payment_mode, status) VALUES ($1, $2, $3, $4, $5, $6)',
-      [orderId, kitchenId, JSON.stringify(cartData.items), cartData.total + cartData.deliveryFee, 'COD', 'placed']
-    );
-  }
+  await pool.query(
+    'INSERT INTO order_history (order_id, kitchen_id, items, total, payment_mode, status) VALUES ($1, $2, $3, $4, $5, $6)',
+    [orderId, kitchenId, JSON.stringify(cartData.items), cartData.total + cartData.deliveryFee, 'COD', 'placed']
+  );
 
   await redis.del(`cart:${kitchenId}`);
 

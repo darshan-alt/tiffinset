@@ -2,9 +2,14 @@ import cron from 'node-cron';
 import pool from '../db/pool.js';
 import { getKitchenMembers } from './routing.js';
 import { sendText } from '../transport/index.js';
-import { logError } from '../middleware/logger.js';
+import { logInfo, logError } from '../middleware/logger.js';
 
 export function setupScheduler() {
+  // Only run scheduled jobs on a single worker under PM2 cluster mode.
+  if (process.env.NODE_APP_INSTANCE && process.env.NODE_APP_INSTANCE !== '0') {
+    logInfo({}, 'scheduler_skipped', { instance: process.env.NODE_APP_INSTANCE });
+    return;
+  }
   // 1. Leftover check-in
   cron.schedule('0 8 * * *', async () => {
     try {

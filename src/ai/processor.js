@@ -44,11 +44,11 @@ export async function processMessage(chatId, text) {
   // 6. Agentic loop
   const context = { chatId, kitchenId: profile.kitchen_id, role: profile.role };
 
-  // Filter tools by role — cooks and contributors don't get commerce tools
+  // Filter tools by role — only the owner gets commerce + override tools
   let activeTools = toolDefinitions;
   if (profile.role === 'cook') {
     activeTools = toolDefinitions.filter(t =>
-      !['search_instamart', 'add_to_cart', 'view_cart', 'place_order', 'get_order_history'].includes(t.name)
+      !['search_instamart', 'add_to_cart', 'view_cart', 'place_order', 'get_order_history', 'save_recipe_override'].includes(t.name)
     );
   } else if (profile.role === 'contributor') {
     activeTools = toolDefinitions.filter(t =>
@@ -106,7 +106,18 @@ export async function processMessage(chatId, text) {
 }
 
 async function saveHistory(key, history) {
-  // Cap at last MAX_HISTORY entries to avoid unbounded growth
-  const trimmed = history.slice(-MAX_HISTORY);
+  // Cap at last MAX_HISTORY entries, but drop any leading turn that would
+  // leave a functionResponse without its preceding functionCall (Gemini 400s on that).
+  let trimmed = history.slice(-MAX_HISTORY);
+  while (trimmed.length > 0) {
+    const first = trimmed[0];
+    const isOrphanResponse = first.role === 'user' && first.parts?.some(p => p.functionResponse);
+    const isLeadingModelTurn = first.role === 'model';
+    if (isOrphanResponse || isLeadingModelTurn) {
+      trimmed.shift();
+    } else {
+      break;
+    }
+  }
   await redis.setex(key, HISTORY_TTL, JSON.stringify(trimmed));
 }
