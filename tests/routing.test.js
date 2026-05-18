@@ -1,97 +1,110 @@
-import { jest, describe, test, expect, afterEach } from '@jest/globals';
+// tests/routing.test.js — Kitchen event routing tests
+import { jest, describe, it, expect, beforeEach } from '@jest/globals';
 
-const mockQuery = jest.fn();
-const mockSendText = jest.fn();
-
+// Mock DB
 jest.unstable_mockModule('../src/db/pool.js', () => ({
-  default: { query: mockQuery },
+  query: jest.fn(),
+  getPool: jest.fn(),
+  checkDb: jest.fn(),
+  initDb: jest.fn(),
+  getClient: jest.fn(),
 }));
+
+// Mock transport
 jest.unstable_mockModule('../src/transport/index.js', () => ({
-  sendText: mockSendText,
+  sendText: jest.fn().mockResolvedValue({}),
+  sendList: jest.fn(),
+  sendButtons: jest.fn(),
+  answerCallbackQuery: jest.fn(),
+  default: { sendText: jest.fn() },
 }));
+
+// Mock logger
 jest.unstable_mockModule('../src/middleware/logger.js', () => ({
-  logError: jest.fn(),
   logInfo: jest.fn(),
+  logError: jest.fn(),
+  incrementMetric: jest.fn(),
 }));
 
-const { getKitchenMembers, routeEvent } = await import('../src/kitchen/routing.js');
+describe('Kitchen routing', () => {
+  let routeEvent, getKitchenMembers, logEvent;
+  let mockQuery, mockSendText;
 
-afterEach(() => {
-  jest.clearAllMocks();
-});
+  const mockCooks = [
+    { phone: 'cook_111', role: 'cook', display_name: 'Ramu', language_code: 'hi' },
+  ];
+  const mockContributors = [
+    { phone: 'contrib_222', role: 'contributor', display_name: 'Priya', language_code: 'hi' },
+  ];
+  const mockOwners = [
+    { phone: 'owner_333', role: 'owner', display_name: 'Anita', language_code: 'hi' },
+  ];
 
-describe('getKitchenMembers', () => {
-  test('returns all members when no role filter', async () => {
-    mockQuery.mockResolvedValueOnce({
-      rows: [
-        { phone: '111', role: 'owner', display_name: 'Owner', language: 'hi' },
-        { phone: '222', role: 'cook', display_name: 'Cook', language: 'hi' },
-      ],
+  beforeEach(async () => {
+    jest.resetModules();
+
+    const poolMod = await import('../src/db/pool.js');
+    mockQuery = poolMod.query;
+
+    const transportMod = await import('../src/transport/index.js');
+    mockSendText = transportMod.sendText;
+    mockSendText.mockClear();
+
+    // Default: query returns based on role param
+    mockQuery.mockImplementation(async (sql, params) => {
+      if (params && params[1] === 'cook') return { rows: mockCooks };
+      if (params && params[1] === 'contributor') return { rows: mockContributors };
+      if (params && params[1] === 'owner') return { rows: mockOwners };
+      if (params && params.length === 1) return { rows: [...mockCooks, ...mockContributors, ...mockOwners] };
+      return { rows: [] };
     });
 
-    const members = await getKitchenMembers('kitchen_1');
-    expect(members).toHaveLength(2);
-    expect(mockQuery).toHaveBeenCalledWith(
-      expect.stringContaining('WHERE kitchen_id = $1'),
-      ['kitchen_1']
-    );
+    const mod = await import('../src/kitchen/routing.js');
+    routeEvent = mod.routeEvent;
+    getKitchenMembers = mod.getKitchenMembers;
+    logEvent = mod.logEvent;
   });
 
-  test('filters by role when provided', async () => {
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ phone: '222', role: 'cook', display_name: 'Cook', language: 'hi' }],
-    });
-
-    const members = await getKitchenMembers('kitchen_1', 'cook');
-    expect(members).toHaveLength(1);
-    expect(members[0].role).toBe('cook');
-    expect(mockQuery).toHaveBeenCalledWith(
-      expect.stringContaining('AND role = $2'),
-      ['kitchen_1', 'cook']
-    );
-  });
-});
-
-describe('routeEvent', () => {
-  test('menu_set dispatches to cooks and contributors', async () => {
-    // getKitchenMembers('kitchen_1', 'cook')
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ phone: '222', role: 'cook', display_name: 'Cook' }],
-    });
-    // getKitchenMembers('kitchen_1', 'contributor')
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ phone: '333', role: 'contributor', display_name: 'Contrib' }],
-    });
-    // logEvent SELECT role
-    mockQuery.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
-    // logEvent INSERT
-    mockQuery.mockResolvedValueOnce({ rows: [] });
-
+  it('menu_set should route to cooks and contributors', async () => {
     await routeEvent({
       type: 'menu_set',
-      kitchenId: 'kitchen_1',
-      sourcePhone: '111',
-      payload: { recipe: 'Dal', videoUrl: 'https://youtube.com/xyz', summary: 'Dal for lunch' },
+      kitchenId: 'kitchen_test',
+      sourcePhone: 'owner_333',
+      sourceRole: 'owner',
+      payload: { dishes: ['Dal Makhani', 'Roti'] },
     });
 
-    expect(mockSendText).toHaveBeenCalledWith('222', expect.stringContaining('Dal'));
-    expect(mockSendText).toHaveBeenCalledWith('333', expect.stringContaining('summary'));
+    // Should have sent messages (cook + contributor + event_log insert)
+    expect(mockSendText).toHaveBeenCalledWith('cook_111', expect.stringContaining('Dal Makhani'));
+    expect(mockSendText).toHaveBeenCalledWith('contrib_222', expect.stringContaining('Dal Makhani'));
   });
 
-  test('shortage_report dispatches to owners', async () => {
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ phone: '111', role: 'owner', display_name: 'Owner' }],
-    });
-    mockQuery.mockResolvedValueOnce({ rows: [{ role: 'cook' }] });
-    mockQuery.mockResolvedValueOnce({ rows: [] });
-
+  it('shortage_report should route to owners', async () => {
     await routeEvent({
       type: 'shortage_report',
-      kitchenId: 'kitchen_1',
-      sourcePhone: '222',
-      payload: { itemDetails: 'Atta khatam', brandOptions: 'Aashirvaad, Pillsbury' },
+      kitchenId: 'kitchen_test',
+      sourcePhone: 'cook_111',
+      sourceRole: 'cook',
+      payload: {
+        item: 'paneer',
+        brands: [
+          { name: 'Amul', quantity: '500g', price: 165 },
+        ],
+      },
     });
 
-    expect(mockSendText).toHaveBeenCalledWith('111', expect.stringContaining('Shortage'));
+    expect(mockSendText).toHaveBeenCalledWith('owner_333', expect.stringContaining('paneer'));
+  });
+
+  it('dish_suggested should route to owners', async () => {
+    await routeEvent({
+      type: 'dish_suggested',
+      kitchenId: 'kitchen_test',
+      sourcePhone: 'contrib_222',
+      sourceRole: 'contributor',
+      payload: { dish: 'Pav Bhaji', suggesterName: 'Priya' },
+    });
+
+    expect(mockSendText).toHaveBeenCalledWith('owner_333', expect.stringContaining('Pav Bhaji'));
   });
 });

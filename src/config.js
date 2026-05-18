@@ -1,52 +1,81 @@
-import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
+// src/config.js — Secret Manager loader with .env fallback
+import { readFileSync, existsSync } from 'fs';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
 
-const client = new SecretManagerServiceClient();
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
-async function getSecret(name) {
-  const projectId = process.env.GOOGLE_CLOUD_PROJECT || 'tiffinset';
-  const [version] = await client.accessSecretVersion({
-    name: `projects/${projectId}/secrets/${name}/versions/latest`,
-  });
-  return version.payload.data.toString();
+// Load .env manually in dev (no dotenv dependency)
+function loadDotEnv() {
+  const envPath = resolve(__dirname, '../.env');
+  if (!existsSync(envPath)) return;
+  const lines = readFileSync(envPath, 'utf8').split('\n');
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    const val = trimmed.slice(eqIdx + 1).trim();
+    if (!process.env[key]) process.env[key] = val;
+  }
 }
 
-const config = {
-  TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN,
-  GEMINI_API_KEY: process.env.GEMINI_API_KEY,
-  WHISPER_API_KEY: process.env.WHISPER_API_KEY,
-  YOUTUBE_API_KEY: process.env.YOUTUBE_API_KEY,
-  WEBHOOK_VERIFY_TOKEN: process.env.WEBHOOK_VERIFY_TOKEN,
-  DATABASE_URL: process.env.DATABASE_URL,
-  ACTIVE_TRANSPORT: process.env.ACTIVE_TRANSPORT || 'telegram',
-  REDIS_URL: process.env.REDIS_URL || 'redis://localhost:6379',
-  SWIGGY_CLIENT_ID: process.env.SWIGGY_CLIENT_ID,
-  SWIGGY_CLIENT_SECRET: process.env.SWIGGY_CLIENT_SECRET,
-  METRICS_TOKEN: process.env.METRICS_TOKEN,
-};
-
-const secretNames = [
-  'TELEGRAM_BOT_TOKEN',
-  'GEMINI_API_KEY',
-  'WHISPER_API_KEY',
-  'YOUTUBE_API_KEY',
-  'WEBHOOK_VERIFY_TOKEN',
-  'DATABASE_URL',
-  'SWIGGY_CLIENT_ID',
-  'SWIGGY_CLIENT_SECRET',
-];
+export const config = {};
 
 export async function initConfig() {
-  if (process.env.NODE_ENV === 'production') {
-    for (const name of secretNames) {
-      try {
-        config[name] = await getSecret(name);
-      } catch (error) {
-        console.error(`Error loading secret ${name}:`, error);
-        throw new Error(`Failed to load critical secret: ${name}`);
-      }
-    }
+  const isDev = process.env.NODE_ENV !== 'production';
+
+  if (isDev) {
+    loadDotEnv();
+    config.TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+    config.GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+    config.WHISPER_API_KEY = process.env.WHISPER_API_KEY || '';
+    config.YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
+    config.WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN || 'tiffinset-verify-2026';
+    config.DATABASE_URL = process.env.DATABASE_URL || 'postgres://tiffinset_admin:password@localhost:5432/tiffinset';
+  } else {
+    // Production: load from GCP Secret Manager
+    const { SecretManagerServiceClient } = await import('@google-cloud/secret-manager');
+    const client = new SecretManagerServiceClient();
+
+    const getSecret = async (name) => {
+      const projectId = await client.getProjectId();
+      const [version] = await client.accessSecretVersion({
+        name: `projects/${projectId}/secrets/${name}/versions/latest`,
+      });
+      return version.payload.data.toString('utf8').trim();
+    };
+
+    const [
+      telegramToken,
+      geminiKey,
+      whisperKey,
+      youtubeKey,
+      webhookToken,
+      dbUrl,
+    ] = await Promise.all([
+      getSecret('TELEGRAM_BOT_TOKEN'),
+      getSecret('GEMINI_API_KEY'),
+      getSecret('WHISPER_API_KEY'),
+      getSecret('YOUTUBE_API_KEY'),
+      getSecret('WEBHOOK_VERIFY_TOKEN'),
+      getSecret('DATABASE_URL'),
+    ]);
+
+    config.TELEGRAM_BOT_TOKEN = telegramToken;
+    config.GEMINI_API_KEY = geminiKey;
+    config.WHISPER_API_KEY = whisperKey;
+    config.YOUTUBE_API_KEY = youtubeKey;
+    config.WEBHOOK_VERIFY_TOKEN = webhookToken;
+    config.DATABASE_URL = dbUrl;
   }
+
+  config.ACTIVE_TRANSPORT = process.env.ACTIVE_TRANSPORT || 'telegram';
+  config.REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+  config.PORT = parseInt(process.env.PORT || '3000', 10);
+  config.NODE_ENV = process.env.NODE_ENV || 'development';
+  config.METRICS_TOKEN = process.env.METRICS_TOKEN || '';
+
   return config;
 }
-
-export default config;

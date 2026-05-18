@@ -1,28 +1,26 @@
-import redis from '../db/redis.js';
-import { logInfo, logError } from './logger.js';
+// src/middleware/dedup.js — Message deduplication via Redis SET NX
+import { getRedis } from '../db/redis.js';
 
-export default async function dedup(req, res, next) {
-  const body = req.body;
-  const messageId = body.message?.message_id || body.callback_query?.id;
+const DEDUP_TTL = 300; // 5 minutes
 
-  if (!messageId) return next();
+/**
+ * Check and mark a message ID as seen.
+ * Returns true if this is a NEW (non-duplicate) message.
+ * Returns false if duplicate — caller should skip processing.
+ * Fails open on Redis error.
+ */
+export async function checkDedup(messageId) {
+  if (!messageId) return true; // no ID = can't dedup, allow through
 
-  const key = `tiffinset:msg:${messageId}`;
   try {
-    const result = await redis.set(key, '1', 'EX', 300, 'NX');
-
-    if (result !== 'OK') {
-      logInfo({}, 'duplicate_message_dropped', { 
-        messageId, 
-        redisResult: result,
-        chatId: body.message?.chat?.id || body.callback_query?.message?.chat?.id
-      });
-      return res.status(200).send('Duplicate');
-    }
+    const redis = getRedis();
+    const key = `tiffinset:msg:${messageId}`;
+    // SET NX returns 1 if set (new), null if key existed (duplicate)
+    const result = await redis.set(key, '1', 'EX', DEDUP_TTL, 'NX');
+    return result !== null; // true = new message
   } catch (err) {
-    // If Redis fails, we prefer processing the message over dropping it
-    logError({}, 'dedup_redis_error', err);
+    // Fail open — prefer processing over blocking
+    console.error('[Dedup] Redis error, failing open:', err.message);
+    return true;
   }
-
-  next();
 }

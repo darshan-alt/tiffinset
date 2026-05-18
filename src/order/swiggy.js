@@ -1,131 +1,302 @@
+// src/order/swiggy.js — Mock Swiggy Instamart with realistic Indian brand data
+import { getRedis } from '../db/redis.js';
+import { query } from '../db/pool.js';
 import { v4 as uuidv4 } from 'uuid';
-import redis from '../db/redis.js';
-import pool from '../db/pool.js';
+import { logInfo, logError, incrementMetric } from '../middleware/logger.js';
+
+const CART_TTL = 2 * 60 * 60;       // 2 hours
+const CACHE_TTL = 30 * 60;           // 30 minutes
+const FREE_DELIVERY_THRESHOLD = 199;
+const DELIVERY_FEE = 30;
+
+// ─── Mock product database (realistic 2026 INR prices) ──────────────────────
 
 const MOCK_PRODUCTS = {
   atta: [
-    { brand: 'Aashirvaad', name: 'Aashirvaad Superior MP Atta 5kg', price: 280, weight: '5kg' },
-    { brand: 'Pillsbury', name: 'Pillsbury Chakki Fresh Atta 5kg', price: 265, weight: '5kg' },
-    { brand: 'Rajdhani', name: 'Rajdhani Atta 5kg', price: 240, weight: '5kg' },
+    { brand: 'Aashirvaad', quantity: '5kg', price: 280 },
+    { brand: 'Pillsbury', quantity: '5kg', price: 265 },
+    { brand: 'Rajdhani', quantity: '5kg', price: 240 },
+  ],
+  flour: [
+    { brand: 'Aashirvaad', quantity: '5kg', price: 280 },
+    { brand: 'Pillsbury', quantity: '5kg', price: 265 },
+    { brand: 'Rajdhani', quantity: '5kg', price: 240 },
   ],
   dal: [
-    { brand: 'Tata Sampann', name: 'Tata Sampann Toor Dal 1kg', price: 145, weight: '1kg' },
-    { brand: 'Fortune', name: 'Fortune Arhar Dal 1kg', price: 128, weight: '1kg' },
-    { brand: 'Organic Tattva', name: 'Organic Tattva Toor Dal 1kg', price: 195, weight: '1kg' },
+    { brand: 'Tata Sampann', quantity: '1kg', price: 145 },
+    { brand: 'Fortune', quantity: '1kg', price: 128 },
+    { brand: 'Organic Tattva', quantity: '1kg', price: 195 },
+  ],
+  lentils: [
+    { brand: 'Tata Sampann', quantity: '1kg', price: 145 },
+    { brand: 'Fortune', quantity: '1kg', price: 128 },
+    { brand: 'Organic Tattva', quantity: '1kg', price: 195 },
   ],
   rice: [
-    { brand: 'India Gate', name: 'India Gate Basmati Rice 5kg', price: 320, weight: '5kg' },
-    { brand: 'Daawat', name: 'Daawat Rozana Basmati Rice 5kg', price: 295, weight: '5kg' },
-    { brand: 'Fortune', name: 'Fortune Basmati Rice 5kg', price: 270, weight: '5kg' },
+    { brand: 'India Gate', quantity: '5kg', price: 320 },
+    { brand: 'Daawat', quantity: '5kg', price: 295 },
+    { brand: 'Fortune', quantity: '5kg', price: 270 },
   ],
   paneer: [
-    { brand: 'Amul', name: 'Amul Fresh Paneer 500g', price: 165, weight: '500g' },
-    { brand: 'Mother Dairy', name: 'Mother Dairy Paneer 500g', price: 155, weight: '500g' },
-    { brand: 'Govardhan', name: 'Govardhan Premium Paneer 500g', price: 180, weight: '500g' },
+    { brand: 'Amul', quantity: '500g', price: 165 },
+    { brand: 'Mother Dairy', quantity: '500g', price: 155 },
+    { brand: 'Govardhan', quantity: '500g', price: 180 },
   ],
   oil: [
-    { brand: 'Fortune', name: 'Fortune Refined Sunflower Oil 1L', price: 155, weight: '1L' },
-    { brand: 'Saffola Gold', name: 'Saffola Gold Blended Oil 1L', price: 185, weight: '1L' },
-    { brand: 'Dhara', name: 'Dhara Refined Sunflower Oil 1L', price: 140, weight: '1L' },
+    { brand: 'Fortune', quantity: '1L', price: 155 },
+    { brand: 'Saffola Gold', quantity: '1L', price: 185 },
+    { brand: 'Dhara', quantity: '1L', price: 140 },
+  ],
+  'cooking oil': [
+    { brand: 'Fortune', quantity: '1L', price: 155 },
+    { brand: 'Saffola Gold', quantity: '1L', price: 185 },
+    { brand: 'Dhara', quantity: '1L', price: 140 },
   ],
   ghee: [
-    { brand: 'Amul', name: 'Amul Pure Ghee 500ml', price: 290, weight: '500ml' },
-    { brand: 'Patanjali', name: 'Patanjali Cow Ghee 500ml', price: 260, weight: '500ml' },
-    { brand: 'Nandini', name: 'Nandini Pure Ghee 500ml', price: 275, weight: '500ml' },
+    { brand: 'Amul', quantity: '500ml', price: 290 },
+    { brand: 'Patanjali', quantity: '500ml', price: 260 },
+    { brand: 'Nandini', quantity: '500ml', price: 275 },
   ],
-  onion: [{ brand: 'Fresh', name: 'Fresh Onion 1kg', price: 35, weight: '1kg' }],
-  tomato: [{ brand: 'Fresh', name: 'Fresh Tomato 1kg', price: 40, weight: '1kg' }],
-  potato: [{ brand: 'Fresh', name: 'Fresh Potato 1kg', price: 25, weight: '1kg' }],
-  chilli: [{ brand: 'Fresh', name: 'Fresh Green Chilli 100g', price: 15, weight: '100g' }],
   spices: [
-    { brand: 'MDH', name: 'MDH Garam Masala 100g', price: 85, weight: '100g' },
-    { brand: 'Everest', name: 'Everest Meat Masala 100g', price: 75, weight: '100g' },
-    { brand: 'Catch', name: 'Catch Sabzi Masala 100g', price: 45, weight: '100g' },
-  ]
+    { brand: 'MDH', quantity: '100g', price: 85 },
+    { brand: 'Everest', quantity: '100g', price: 75 },
+    { brand: 'Catch', quantity: '100g', price: 45 },
+  ],
+  masala: [
+    { brand: 'MDH', quantity: '100g', price: 85 },
+    { brand: 'Everest', quantity: '100g', price: 75 },
+    { brand: 'Catch', quantity: '100g', price: 45 },
+  ],
+  salt: [
+    { brand: 'Tata Salt', quantity: '1kg', price: 28 },
+    { brand: 'Catch', quantity: '1kg', price: 25 },
+    { brand: 'Aashirvaad', quantity: '1kg', price: 30 },
+  ],
+  sugar: [
+    { brand: 'Madhur', quantity: '1kg', price: 48 },
+    { brand: 'Nature Fresh', quantity: '1kg', price: 52 },
+    { brand: 'Double Refined', quantity: '1kg', price: 45 },
+  ],
+  milk: [
+    { brand: 'Amul Gold', quantity: '1L', price: 66 },
+    { brand: 'Mother Dairy', quantity: '1L', price: 64 },
+    { brand: 'Nandini', quantity: '1L', price: 60 },
+  ],
+  butter: [
+    { brand: 'Amul', quantity: '500g', price: 260 },
+    { brand: 'Britannia', quantity: '500g', price: 275 },
+    { brand: 'Mother Dairy', quantity: '500g', price: 255 },
+  ],
+  onion: [
+    { brand: 'Fresh Onion', quantity: '1kg', price: 35 },
+    { brand: 'Organic Onion', quantity: '1kg', price: 55 },
+    { brand: 'Premium Onion', quantity: '1kg', price: 42 },
+  ],
+  tomato: [
+    { brand: 'Fresh Tomato', quantity: '500g', price: 20 },
+    { brand: 'Organic Tomato', quantity: '500g', price: 35 },
+    { brand: 'Premium Tomato', quantity: '500g', price: 25 },
+  ],
+  potato: [
+    { brand: 'Fresh Potato', quantity: '1kg', price: 25 },
+    { brand: 'Organic Potato', quantity: '1kg', price: 40 },
+    { brand: 'Premium Potato', quantity: '1kg', price: 30 },
+  ],
+  tea: [
+    { brand: 'Tata Tea Gold', quantity: '500g', price: 145 },
+    { brand: 'Brooke Bond', quantity: '500g', price: 135 },
+    { brand: 'Wagh Bakri', quantity: '500g', price: 155 },
+  ],
+  coffee: [
+    { brand: 'Nescafe Classic', quantity: '200g', price: 295 },
+    { brand: 'Bru Gold', quantity: '200g', price: 275 },
+    { brand: 'Continental', quantity: '200g', price: 310 },
+  ],
+  'curd': [
+    { brand: 'Amul', quantity: '400g', price: 48 },
+    { brand: 'Mother Dairy', quantity: '400g', price: 45 },
+    { brand: 'Epigamia', quantity: '400g', price: 65 },
+  ],
+  yogurt: [
+    { brand: 'Amul', quantity: '400g', price: 48 },
+    { brand: 'Mother Dairy', quantity: '400g', price: 45 },
+    { brand: 'Epigamia', quantity: '400g', price: 65 },
+  ],
 };
 
-export async function searchProduct(kitchenId, itemName, quantity) {
-  const cacheKey = `swiggy_cache:${kitchenId}:${itemName}`;
-  const cached = await redis.get(cacheKey);
-  if (cached) return JSON.parse(cached);
+/**
+ * Find best matching product category for a search term.
+ */
+function findCategory(itemName) {
+  const normalized = itemName.toLowerCase().trim();
+  // Direct match
+  if (MOCK_PRODUCTS[normalized]) return normalized;
+  // Partial match
+  for (const key of Object.keys(MOCK_PRODUCTS)) {
+    if (normalized.includes(key) || key.includes(normalized)) return key;
+  }
+  return null;
+}
 
-  const lower = itemName.toLowerCase().trim();
-  const tokens = lower.split(/\s+/).filter(Boolean);
-  let matched = [];
-  for (const [key, products] of Object.entries(MOCK_PRODUCTS)) {
-    if (tokens.includes(key) || lower === key) {
-      matched = products;
-      break;
-    }
+/**
+ * Search for grocery products. Returns 3 brands with INR prices.
+ * Cached per kitchen in Redis for 30 minutes.
+ */
+export async function searchProduct(kitchenId, itemName, quantityHint = null) {
+  const cacheKey = `swiggy_cache:${kitchenId}:${itemName.toLowerCase().trim()}`;
+
+  try {
+    const redis = getRedis();
+    const cached = await redis.get(cacheKey);
+    if (cached) return JSON.parse(cached);
+  } catch (err) {
+    // Ignore Redis read error
   }
 
-  if (matched.length === 0) {
-    matched = [
-      { brand: 'Tata', name: `Tata ${itemName}`, price: 99, weight: quantity || 'standard' },
-      { brand: 'Fortune', name: `Fortune ${itemName}`, price: 89, weight: quantity || 'standard' },
-      { brand: 'Local', name: `Local ${itemName}`, price: 79, weight: quantity || 'standard' },
+  const category = findCategory(itemName);
+  let products;
+
+  if (category) {
+    products = MOCK_PRODUCTS[category].map((p) => ({
+      product_id: uuidv4(),
+      product_name: `${p.brand} ${itemName} ${p.quantity}`,
+      brand: p.brand,
+      quantity: p.quantity,
+      price: p.price,
+      in_stock: true,
+    }));
+  } else {
+    // Generic fallback for unknown items
+    products = [
+      { product_id: uuidv4(), product_name: `${itemName} (Standard)`, brand: 'Generic', quantity: '1 unit', price: 50, in_stock: true },
+      { product_id: uuidv4(), product_name: `${itemName} (Premium)`, brand: 'Premium', quantity: '1 unit', price: 75, in_stock: true },
+      { product_id: uuidv4(), product_name: `${itemName} (Budget)`, brand: 'Budget', quantity: '1 unit', price: 35, in_stock: true },
     ];
   }
 
-  const result = matched.map(p => ({
-    id: 'mock_' + uuidv4(),
-    ...p,
-    available: true
-  }));
+  const result = { products, item: itemName, category };
 
-  await redis.setex(cacheKey, 1800, JSON.stringify(result));
+  try {
+    const redis = getRedis();
+    await redis.set(cacheKey, JSON.stringify(result), 'EX', CACHE_TTL);
+  } catch (err) {
+    // Ignore Redis write error
+  }
+
   return result;
 }
 
-export async function addToCart(kitchenId, productId, productName, price, quantity = 1) {
+/**
+ * Add an item to the kitchen cart (Redis).
+ */
+export async function addToCart(kitchenId, item) {
+  const redis = getRedis();
   const cartKey = `cart:${kitchenId}`;
-  const cartStr = await redis.get(cartKey);
-  const cart = cartStr ? JSON.parse(cartStr) : [];
-  
-  cart.push({ productId, productName, price, quantity });
-  
-  await redis.setex(cartKey, 7200, JSON.stringify(cart));
-  return { success: true, cartSize: cart.length };
-}
 
-export async function viewCart(kitchenId) {
-  const cartKey = `cart:${kitchenId}`;
-  const cartStr = await redis.get(cartKey);
-  const items = cartStr ? JSON.parse(cartStr) : [];
-  const total = items.reduce((sum, i) => sum + (i.price * (i.quantity || 1)), 0);
-  
-  return { 
-    items, 
-    total, 
-    itemCount: items.length, 
-    freeDeliveryMin: 199, 
-    deliveryFee: total >= 199 ? 0 : 30 
-  };
-}
+  const raw = await redis.get(cartKey);
+  const cart = raw ? JSON.parse(raw) : [];
 
-export async function placeOrder(kitchenId, ownerChatId) {
-  const cartData = await viewCart(kitchenId);
-  if (cartData.items.length === 0) {
-    return { error: 'Cart is empty' };
+  // Check if already in cart — update quantity
+  const existingIdx = cart.findIndex((c) => c.product_id === item.product_id);
+  if (existingIdx >= 0) {
+    cart[existingIdx].quantity += (item.quantity || 1);
+  } else {
+    cart.push({
+      product_id: item.product_id,
+      product_name: item.product_name,
+      price: item.price,
+      quantity: item.quantity || 1,
+    });
   }
 
-  const orderId = uuidv4();
-  const idempotencyKey = `idempotency:${orderId}`;
-  await redis.setex(idempotencyKey, 300, 'processing');
+  await redis.set(cartKey, JSON.stringify(cart), 'EX', CART_TTL);
 
-  await pool.query(
-    'INSERT INTO order_history (order_id, kitchen_id, items, total, payment_mode, status) VALUES ($1, $2, $3, $4, $5, $6)',
-    [orderId, kitchenId, JSON.stringify(cartData.items), cartData.total + cartData.deliveryFee, 'COD', 'placed']
-  );
+  const total = cart.reduce((sum, c) => sum + c.price * c.quantity, 0);
+  const deliveryFee = total < FREE_DELIVERY_THRESHOLD ? DELIVERY_FEE : 0;
 
-  await redis.del(`cart:${kitchenId}`);
+  return { added: true, cartItems: cart.length, total, deliveryFee };
+}
 
-  return { 
-    orderId, 
-    items: cartData.items, 
-    total: cartData.total + cartData.deliveryFee, 
-    deliveryFee: cartData.deliveryFee, 
-    eta: '15-20 minutes', 
-    payment: 'Cash on Delivery' 
+/**
+ * View current cart contents.
+ */
+export async function viewCart(kitchenId) {
+  const redis = getRedis();
+  const cartKey = `cart:${kitchenId}`;
+  const raw = await redis.get(cartKey);
+  const cart = raw ? JSON.parse(raw) : [];
+
+  const total = cart.reduce((sum, c) => sum + c.price * c.quantity, 0);
+  const deliveryFee = total < FREE_DELIVERY_THRESHOLD ? DELIVERY_FEE : 0;
+
+  return {
+    items: cart,
+    total,
+    deliveryFee,
+    grandTotal: total + deliveryFee,
+    freeDeliveryAt: FREE_DELIVERY_THRESHOLD,
   };
+}
+
+/**
+ * Place an order from the cart.
+ * Requires confirmed=true — Gemini must ask the user first.
+ */
+export async function placeOrder(kitchenId, chatId, confirmed) {
+  if (!confirmed) {
+    const cart = await viewCart(kitchenId);
+    return {
+      requiresConfirmation: true,
+      message: 'Order confirm karna hai? Cart summary dekho aur "haan" bolo.',
+      ...cart,
+    };
+  }
+
+  const redis = getRedis();
+  const cartKey = `cart:${kitchenId}`;
+  const raw = await redis.get(cartKey);
+  const cart = raw ? JSON.parse(raw) : [];
+
+  if (cart.length === 0) {
+    return { placed: false, reason: 'Cart empty hai. Pehle kuch add karo.' };
+  }
+
+  const total = cart.reduce((sum, c) => sum + c.price * c.quantity, 0);
+  const deliveryFee = total < FREE_DELIVERY_THRESHOLD ? DELIVERY_FEE : 0;
+  const orderId = uuidv4();
+
+  // Idempotency check
+  const idempKey = `idempotency:${orderId}`;
+  const idempResult = await redis.set(idempKey, '1', 'EX', 300, 'NX');
+  if (!idempResult) {
+    return { placed: false, reason: 'Order already being processed' };
+  }
+
+  try {
+    await query(
+      `INSERT INTO order_history (order_id, kitchen_id, items, total, payment_mode, status)
+       VALUES ($1, $2, $3, $4, 'COD', 'placed')`,
+      [orderId, kitchenId, JSON.stringify(cart), total + deliveryFee]
+    );
+
+    // Clear cart
+    await redis.del(cartKey);
+
+    incrementMetric('ordersPlaced').catch(() => {});
+    logInfo('swiggy', 'order_placed', { orderId, kitchenId, total, items: cart.length });
+
+    return {
+      placed: true,
+      orderId,
+      items: cart,
+      total,
+      deliveryFee,
+      grandTotal: total + deliveryFee,
+      eta: '15-20 minutes',
+      paymentMode: 'Cash on Delivery',
+    };
+  } catch (err) {
+    logError('swiggy', 'place_order_error', err, { kitchenId });
+    return { placed: false, error: err.message };
+  }
 }

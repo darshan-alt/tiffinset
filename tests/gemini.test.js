@@ -1,81 +1,126 @@
-import { jest, describe, test, expect, afterEach } from '@jest/globals';
+// tests/gemini.test.js — Gemini API client tests
+import { jest, describe, it, expect, beforeEach } from '@jest/globals';
 
+// Mock node-fetch
 const mockFetch = jest.fn();
+jest.unstable_mockModule('node-fetch', () => ({ default: mockFetch }));
 
-jest.unstable_mockModule('node-fetch', () => ({
-  default: mockFetch,
-}));
+// Mock config
 jest.unstable_mockModule('../src/config.js', () => ({
-  default: { GEMINI_API_KEY: 'test-key' },
+  config: { GEMINI_API_KEY: 'test-key' },
+  initConfig: jest.fn(),
 }));
+
+// Mock logger
 jest.unstable_mockModule('../src/middleware/logger.js', () => ({
   logInfo: jest.fn(),
   logError: jest.fn(),
-  incrementMetric: jest.fn(),
+  incrementMetric: jest.fn().mockResolvedValue(1),
 }));
 
-const { callGemini } = await import('../src/ai/gemini.js');
+describe('Gemini AI client', () => {
+  let callGemini;
 
-afterEach(() => {
-  jest.clearAllMocks();
-});
-
-function makeResponse(body, status = 200) {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    json: async () => body,
-    text: async () => JSON.stringify(body),
-  };
-}
-
-describe('callGemini', () => {
-  test('parses a text response correctly', async () => {
-    mockFetch.mockResolvedValueOnce(makeResponse({
-      candidates: [{ content: { parts: [{ text: 'Hello world' }] } }],
-      usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 },
-    }));
-
-    const result = await callGemini('sys prompt', [{ role: 'user', parts: [{ text: 'hi' }] }], []);
-    expect(result.type).toBe('text');
-    expect(result.text).toBe('Hello world');
+  beforeEach(async () => {
+    jest.clearAllMocks();
+    const mod = await import('../src/ai/gemini.js');
+    callGemini = mod.callGemini;
   });
 
-  test('parses a function_call response', async () => {
-    mockFetch.mockResolvedValueOnce(makeResponse({
-      candidates: [{
-        content: {
-          parts: [{ functionCall: { name: 'search_recipe', args: { dish_name: 'dal' } } }],
-        },
-      }],
-    }));
+  it('should parse a text response correctly', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        candidates: [{
+          content: {
+            parts: [{ text: 'Aaj paneer tikka banana chahiye!' }],
+          },
+        }],
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
+      }),
+    });
 
-    const result = await callGemini('sys prompt', [{ role: 'user', parts: [{ text: 'dal recipe' }] }], []);
+    const result = await callGemini('system', [{ role: 'user', parts: [{ text: 'hi' }] }], []);
+    expect(result.type).toBe('text');
+    expect(result.text).toBe('Aaj paneer tikka banana chahiye!');
+  });
+
+  it('should parse a function_call response correctly', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        candidates: [{
+          content: {
+            parts: [{
+              functionCall: {
+                name: 'search_recipe',
+                args: { dish_name: 'dal makhani' },
+              },
+            }],
+          },
+        }],
+        usageMetadata: {},
+      }),
+    });
+
+    const result = await callGemini('system', [], []);
     expect(result.type).toBe('function_call');
     expect(result.name).toBe('search_recipe');
-    expect(result.args).toEqual({ dish_name: 'dal' });
+    expect(result.args.dish_name).toBe('dal makhani');
   });
 
-  test('retries on 5xx and succeeds', async () => {
-    // First call: 500
-    mockFetch.mockResolvedValueOnce(makeResponse({ error: 'server error' }, 500));
-    // Retry: success
-    mockFetch.mockResolvedValueOnce(makeResponse({
-      candidates: [{ content: { parts: [{ text: 'Recovered' }] } }],
-    }));
+  it('should strip thought parts from response', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        candidates: [{
+          content: {
+            parts: [
+              { thought: true, text: 'Let me think about this...' },
+              { text: 'Here is the real answer.' },
+            ],
+          },
+        }],
+        usageMetadata: {},
+      }),
+    });
 
-    const result = await callGemini('sys prompt', [{ role: 'user', parts: [{ text: 'test' }] }], []);
+    const result = await callGemini('system', [], []);
     expect(result.type).toBe('text');
-    expect(result.text).toBe('Recovered');
+    expect(result.text).toBe('Here is the real answer.');
+  });
+
+  it('should retry once on 5xx error and succeed', async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: false, status: 503, text: async () => 'Service Unavailable' })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [{
+            content: { parts: [{ text: 'Retry successful' }] },
+          }],
+          usageMetadata: {},
+        }),
+      });
+
+    const result = await callGemini('system', [], []);
+    expect(result.type).toBe('text');
+    expect(result.text).toBe('Retry successful');
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
-  test('throws on 4xx without retry', async () => {
-    mockFetch.mockResolvedValueOnce(makeResponse({ error: 'bad request' }, 400));
+  it('should NOT retry on 4xx error', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: { message: 'Bad Request' } }),
+    });
 
-    await expect(
-      callGemini('sys prompt', [{ role: 'user', parts: [{ text: 'test' }] }], [])
-    ).rejects.toThrow(/Gemini API 400/);
+    await expect(callGemini('system', [], [])).rejects.toThrow('4xx');
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 });

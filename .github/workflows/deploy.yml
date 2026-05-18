@@ -1,23 +1,22 @@
-name: Deploy
+name: Deploy to GCP
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    
     steps:
-      - uses: actions/checkout@v4
-      - name: Deploy to GCP
-        uses: appleboy/ssh-action@v1
+      - name: Deploy to VM via SSH
+        uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          key: ${{ secrets.VM_SSH_KEY }}
+          host: ${{ secrets.GCP_VM_IP }}
+          username: ${{ secrets.GCP_VM_USER }}
+          key: ${{ secrets.GCP_VM_SSH_KEY }}
           script: |
-            cd ~/tiffinset
+            cd /home/${{ secrets.GCP_VM_USER }}/tiffinset
             git pull origin main
-            npm ci --production
-            pm2 restart tiffinset
-            echo "Deployed at $(date)"
+            npm ci --omit=dev
+            pm2 restart ecosystem.config.cjs

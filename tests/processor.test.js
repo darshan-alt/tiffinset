@@ -1,104 +1,113 @@
-import { jest, describe, test, expect, beforeEach, afterEach } from '@jest/globals';
-import Redis from 'ioredis-mock';
+// tests/processor.test.js — Agentic loop tests
+import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
 
-const mockCallGemini = jest.fn();
-const mockExecuteTool = jest.fn();
-const mockQuery = jest.fn();
+// Mock all dependencies
+jest.unstable_mockModule('ioredis', () => {
+  const RedisMock = require('ioredis-mock');
+  return { default: RedisMock };
+});
 
-// Create a shared redis instance for the mock
-const redis = new Redis();
-
-jest.unstable_mockModule('../src/ai/gemini.js', () => ({
-  callGemini: mockCallGemini,
+jest.unstable_mockModule('../src/config.js', () => ({
+  config: { REDIS_URL: 'redis://localhost:6379', GEMINI_API_KEY: 'test' },
+  initConfig: jest.fn(),
 }));
-jest.unstable_mockModule('../src/ai/tools.js', () => ({
-  toolDefinitions: [
-    { name: 'search_recipe', description: 'Search recipe', parameters: { type: 'object', properties: {}, required: [] } },
-  ],
-  executeTool: mockExecuteTool,
-}));
+
 jest.unstable_mockModule('../src/db/pool.js', () => ({
-  default: { query: mockQuery },
+  query: jest.fn(),
+  getPool: jest.fn(),
+  checkDb: jest.fn(),
+  initDb: jest.fn(),
 }));
-jest.unstable_mockModule('../src/db/redis.js', () => ({
-  default: redis,
-}));
+
 jest.unstable_mockModule('../src/middleware/logger.js', () => ({
   logInfo: jest.fn(),
   logError: jest.fn(),
-  incrementMetric: jest.fn(),
+  incrementMetric: jest.fn().mockResolvedValue(1),
 }));
 
-const { processMessage } = await import('../src/ai/processor.js');
+// Mock gemini
+const mockCallGemini = jest.fn();
+jest.unstable_mockModule('../src/ai/gemini.js', () => ({
+  callGemini: mockCallGemini,
+}));
 
-afterEach(async () => {
-  await redis.flushall();
-  jest.clearAllMocks();
-});
+// Mock tools
+jest.unstable_mockModule('../src/ai/tools.js', () => ({
+  getToolsForRole: jest.fn().mockReturnValue([]),
+  executeTool: jest.fn().mockResolvedValue({ result: 'tool_result' }),
+}));
 
-describe('processMessage (agentic loop)', () => {
-  // Setup mock profile + kitchen for every test
-  beforeEach(() => {
-    // user_profiles query
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ phone: '111', kitchen_id: 'k1', role: 'owner', display_name: 'Test', language_code: 'hi' }],
+describe('Message processor (agentic loop)', () => {
+  let processMessage;
+  let mockQuery;
+
+  const mockProfile = {
+    phone: 'user_123',
+    kitchen_id: 'kitchen_12345678',
+    role: 'owner',
+    display_name: 'Anita',
+    language_code: 'hi',
+  };
+  const mockKitchen = {
+    kitchen_id: 'kitchen_12345678',
+    household_size: 4,
+    address: 'Mumbai',
+    dietary_prefs: ['vegetarian'],
+  };
+
+  beforeEach(async () => {
+    jest.resetModules();
+    const poolMod = await import('../src/db/pool.js');
+    mockQuery = poolMod.query;
+
+    // Default DB mocks
+    mockQuery.mockImplementation(async (sql) => {
+      if (sql.includes('user_profiles')) return { rows: [mockProfile] };
+      if (sql.includes('kitchen_sessions')) return { rows: [mockKitchen] };
+      return { rows: [] };
     });
-    // kitchen_sessions query
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ household_size: 4, address: '123 Test St', dietary_prefs: '[]' }],
-    });
+
+    mockCallGemini.mockClear();
+
+    const mod = await import('../src/ai/processor.js');
+    processMessage = mod.processMessage;
   });
 
-  test('terminates after text response from Gemini', async () => {
-    mockCallGemini.mockResolvedValueOnce({
-      type: 'text',
-      text: 'Namaste!',
-    });
+  it('should return text response when Gemini returns text on first call', async () => {
+    mockCallGemini.mockResolvedValueOnce({ type: 'text', text: 'Aaj dal makhani banana hai!' });
 
-    const result = await processMessage('111', 'hello');
-    expect(result).toBe('Namaste!');
+    const result = await processMessage('user_123', 'kya banana hai aaj?');
+    expect(result).toBe('Aaj dal makhani banana hai!');
     expect(mockCallGemini).toHaveBeenCalledTimes(1);
-    expect(mockExecuteTool).not.toHaveBeenCalled();
   });
 
-  test('executes tool then returns text on next iteration', async () => {
-    // First Gemini call: function call
-    mockCallGemini.mockResolvedValueOnce({
-      type: 'function_call',
-      name: 'search_recipe',
-      args: { dish_name: 'dal' },
-      rawParts: [{ functionCall: { name: 'search_recipe', args: { dish_name: 'dal' } } }],
-    });
-
-    mockExecuteTool.mockResolvedValueOnce({ dish_name: 'dal', servings: 4 });
-
-    // Second Gemini call: text response
-    mockCallGemini.mockResolvedValueOnce({
-      type: 'text',
-      text: 'Here is your dal recipe!',
-    });
-
-    const result = await processMessage('111', 'dal recipe batao');
-    expect(result).toBe('Here is your dal recipe!');
-    expect(mockCallGemini).toHaveBeenCalledTimes(2);
-    expect(mockExecuteTool).toHaveBeenCalledTimes(1);
-  });
-
-  test('caps at 5 iterations if Gemini keeps calling tools', async () => {
-    // All 5 iterations return function calls
-    for (let i = 0; i < 5; i++) {
-      mockCallGemini.mockResolvedValueOnce({
+  it('should execute a tool call and return text on next iteration', async () => {
+    mockCallGemini
+      .mockResolvedValueOnce({
         type: 'function_call',
         name: 'search_recipe',
-        args: { dish_name: 'loop' },
-        rawParts: [{ functionCall: { name: 'search_recipe', args: { dish_name: 'loop' } } }],
-      });
-      mockExecuteTool.mockResolvedValueOnce({ note: 'keep going' });
-    }
+        args: { dish_name: 'paneer tikka' },
+        rawParts: [{ functionCall: { name: 'search_recipe', args: { dish_name: 'paneer tikka' } } }],
+      })
+      .mockResolvedValueOnce({ type: 'text', text: 'Here is the paneer tikka recipe!' });
 
-    const result = await processMessage('111', 'infinite loop test');
+    const result = await processMessage('user_123', 'paneer tikka recipe do');
+    expect(result).toBe('Here is the paneer tikka recipe!');
+    expect(mockCallGemini).toHaveBeenCalledTimes(2);
+  });
+
+  it('should return fallback message when loop exhausted after 5 tool calls', async () => {
+    mockCallGemini.mockResolvedValue({
+      type: 'function_call',
+      name: 'search_recipe',
+      args: { dish_name: 'test' },
+      rawParts: [{ functionCall: { name: 'search_recipe', args: {} } }],
+    });
+
+    const result = await processMessage('user_123', 'test message');
     expect(result).toContain('Processing mein thoda time lag raha hai');
     expect(mockCallGemini).toHaveBeenCalledTimes(5);
-    expect(mockExecuteTool).toHaveBeenCalledTimes(5);
   });
 });

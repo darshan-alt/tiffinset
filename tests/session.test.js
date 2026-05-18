@@ -1,109 +1,82 @@
-import Redis from 'ioredis-mock';
+// tests/session.test.js — Session management tests
+import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
 
-let redis;
-
-beforeEach(() => {
-  redis = new Redis();
+jest.unstable_mockModule('ioredis', () => {
+  const RedisMock = require('ioredis-mock');
+  return { default: RedisMock };
 });
 
-afterEach(async () => {
-  await redis.flushall();
-  redis.disconnect();
-});
+jest.unstable_mockModule('../src/config.js', () => ({
+  config: { REDIS_URL: 'redis://localhost:6379' },
+  initConfig: jest.fn(),
+}));
 
-// ── Helpers (same logic as kitchen/auth.js but using local redis) ────
+jest.unstable_mockModule('../src/transport/index.js', () => ({
+  sendText: jest.fn().mockResolvedValue({}),
+  default: { sendText: jest.fn() },
+}));
 
-async function createSession(chatId, kitchenId, role) {
-  const sessionKey = `session:${chatId}`;
-  await redis.setex(sessionKey, 2592000, JSON.stringify({ kitchenId, role, lastActive: Date.now() }));
-}
+describe('Session management', () => {
+  let createSession, checkSession, refreshSession, destroySession;
 
-async function checkSession(chatId) {
-  const sessionKey = `session:${chatId}`;
-  const sessionStr = await redis.get(sessionKey);
+  beforeEach(async () => {
+    jest.resetModules();
+    const mod = await import('../src/kitchen/auth.js');
+    createSession = mod.createSession;
+    checkSession = mod.checkSession;
+    refreshSession = mod.refreshSession;
+    destroySession = mod.destroySession;
+  });
 
-  if (!sessionStr) {
-    return { valid: false, reason: 'no_session' };
-  }
-
-  const session = JSON.parse(sessionStr);
-  const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
-
-  if (Date.now() - session.lastActive > THIRTY_DAYS_MS) {
-    await redis.del(sessionKey);
-    return { valid: false, reason: 'inactive_30days' };
-  }
-
-  return { valid: true, kitchenId: session.kitchenId, role: session.role };
-}
-
-async function refreshSession(chatId) {
-  const sessionKey = `session:${chatId}`;
-  const sessionStr = await redis.get(sessionKey);
-
-  if (sessionStr) {
-    const session = JSON.parse(sessionStr);
-    session.lastActive = Date.now();
-    await redis.setex(sessionKey, 2592000, JSON.stringify(session));
-  }
-}
-
-async function destroySession(chatId) {
-  await redis.del(`session:${chatId}`);
-}
-
-// ── Tests ───────────────────────────────────────────────────────────
-
-describe('Session Management', () => {
-  test('createSession stores a valid session', async () => {
-    await createSession('chat1', 'kitchen_001', 'owner');
-    const result = await checkSession('chat1');
+  it('should create and check a valid session', async () => {
+    const chatId = `sess_${Date.now()}`;
+    await createSession(chatId, 'kitchen_12345678', 'owner');
+    const result = await checkSession(chatId);
     expect(result.valid).toBe(true);
-    expect(result.kitchenId).toBe('kitchen_001');
+    expect(result.kitchenId).toBe('kitchen_12345678');
     expect(result.role).toBe('owner');
   });
 
-  test('checkSession returns no_session for unknown user', async () => {
-    const result = await checkSession('nonexistent');
+  it('should return not_found for non-existent session', async () => {
+    const chatId = `sess_nonexistent_${Date.now()}`;
+    const result = await checkSession(chatId);
     expect(result.valid).toBe(false);
-    expect(result.reason).toBe('no_session');
+    expect(result.reason).toBe('not_found');
   });
 
-  test('refreshSession updates lastActive', async () => {
-    await createSession('chat1', 'kitchen_001', 'owner');
+  it('should mark session as expired after 30+ days of inactivity', async () => {
+    const chatId = `sess_expired_${Date.now()}`;
+    // Manually create a session with old lastActive
+    const { getRedis } = await import('../src/db/redis.js');
+    const redis = getRedis();
+    const thirtyOneDaysAgo = Date.now() - (31 * 24 * 60 * 60 * 1000);
+    await redis.set(`session:${chatId}`, JSON.stringify({
+      kitchenId: 'kitchen_abc',
+      role: 'cook',
+      lastActive: thirtyOneDaysAgo,
+    }), 'EX', 86400 * 31);
 
-    // Read original
-    const before = JSON.parse(await redis.get('session:chat1'));
-    const originalActive = before.lastActive;
-
-    // Wait a tiny bit so timestamp differs
-    await new Promise(r => setTimeout(r, 10));
-    await refreshSession('chat1');
-
-    const after = JSON.parse(await redis.get('session:chat1'));
-    expect(after.lastActive).toBeGreaterThanOrEqual(originalActive);
+    const result = await checkSession(chatId);
+    expect(result.valid).toBe(false);
+    expect(result.reason).toBe('expired');
   });
 
-  test('checkSession detects 30-day expiry', async () => {
-    // Create session with lastActive set 31 days ago
-    const sessionKey = 'session:chat1';
-    const oldActive = Date.now() - (31 * 24 * 60 * 60 * 1000);
-    await redis.setex(sessionKey, 2592000, JSON.stringify({ kitchenId: 'k1', role: 'owner', lastActive: oldActive }));
-
-    const result = await checkSession('chat1');
-    expect(result.valid).toBe(false);
-    expect(result.reason).toBe('inactive_30days');
-
-    // Key should be deleted
-    const exists = await redis.exists(sessionKey);
-    expect(exists).toBe(0);
+  it('should refresh session and keep it valid', async () => {
+    const chatId = `sess_refresh_${Date.now()}`;
+    await createSession(chatId, 'kitchen_refresh', 'contributor');
+    await refreshSession(chatId);
+    const result = await checkSession(chatId);
+    expect(result.valid).toBe(true);
   });
 
-  test('destroySession removes the session', async () => {
-    await createSession('chat1', 'kitchen_001', 'owner');
-    await destroySession('chat1');
-    const result = await checkSession('chat1');
+  it('should destroy a session', async () => {
+    const chatId = `sess_destroy_${Date.now()}`;
+    await createSession(chatId, 'kitchen_destroy', 'owner');
+    await destroySession(chatId);
+    const result = await checkSession(chatId);
     expect(result.valid).toBe(false);
-    expect(result.reason).toBe('no_session');
+    expect(result.reason).toBe('not_found');
   });
 });

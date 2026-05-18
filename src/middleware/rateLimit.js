@@ -1,27 +1,31 @@
-import redis from '../db/redis.js';
-import { logError } from './logger.js';
+// src/middleware/rateLimit.js — 20 requests/min per chatId via Redis
+import { getRedis } from '../db/redis.js';
+import { logInfo } from './logger.js';
 
-export default async function rateLimit(req, res, next) {
-  const body = req.body;
-  const chatId = body.message?.chat?.id || body.callback_query?.message?.chat?.id;
+const MAX_REQUESTS = 20;
+const WINDOW_SECONDS = 60;
 
-  if (!chatId) return next();
-
+/**
+ * Check if chatId is within rate limit.
+ * Returns true if allowed, false if throttled.
+ * Fails open on Redis error.
+ */
+export async function checkRateLimit(chatId) {
   try {
+    const redis = getRedis();
     const key = `ratelimit:${chatId}`;
-    const current = await redis.incr(key);
-
-    if (current === 1) {
-      await redis.expire(key, 60);
+    const count = await redis.incr(key);
+    if (count === 1) {
+      await redis.expire(key, WINDOW_SECONDS);
     }
-
-    if (current > 20) {
-      return res.status(429).send('Too Many Requests');
+    if (count > MAX_REQUESTS) {
+      logInfo('rateLimit', 'throttled', { chatId, count });
+      return false;
     }
+    return true;
   } catch (err) {
-    // Fail open — prefer processing over blocking when Redis is unavailable.
-    logError({ chatId: String(chatId) }, 'ratelimit_redis_error', err);
+    // Fail open — prefer processing over blocking
+    console.error('[RateLimit] Redis error, failing open:', err.message);
+    return true;
   }
-
-  next();
 }

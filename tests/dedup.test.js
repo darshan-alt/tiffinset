@@ -1,40 +1,50 @@
-import Redis from 'ioredis-mock';
+// tests/dedup.test.js — Deduplication middleware tests
+import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
 
-let redis;
-
-beforeEach(() => {
-  redis = new Redis();
+// Mock ioredis with ioredis-mock (must be sync in jest factory)
+jest.unstable_mockModule('ioredis', () => {
+  const RedisMock = require('ioredis-mock');
+  return { default: RedisMock };
 });
 
-afterEach(async () => {
-  await redis.flushall();
-  redis.disconnect();
-});
+jest.unstable_mockModule('../src/config.js', () => ({
+  config: { REDIS_URL: 'redis://localhost:6379' },
+  initConfig: jest.fn(),
+}));
 
-describe('isDuplicate (dedup logic)', () => {
-  test('returns false (NX succeeds) first time a messageId is seen', async () => {
-    const key = 'msgid:12345';
-    const result = await redis.set(key, '1', 'EX', 300, 'NX');
-    // NX returns 'OK' when key did not exist (i.e. NOT a duplicate)
-    expect(result).toBe('OK');
+describe('Deduplication middleware', () => {
+  let checkDedup;
+
+  beforeEach(async () => {
+    jest.resetModules();
+    const mod = await import('../src/middleware/dedup.js');
+    checkDedup = mod.checkDedup;
   });
 
-  test('returns null (NX fails) second time same messageId is seen', async () => {
-    const key = 'msgid:12345';
-    await redis.set(key, '1', 'EX', 300, 'NX');
-    const result = await redis.set(key, '1', 'EX', 300, 'NX');
-    // NX returns null when key already exists (i.e. IS a duplicate)
-    expect(result).toBeNull();
+  it('should allow a new message through', async () => {
+    const result = await checkDedup('msg_unique_123');
+    expect(result).toBe(true);
   });
 
-  test('returns false again after TTL expires (key gone)', async () => {
-    const key = 'msgid:99999';
-    await redis.set(key, '1', 'EX', 1, 'NX');
+  it('should block a duplicate message', async () => {
+    const msgId = 'msg_duplicate_456';
+    const first = await checkDedup(msgId);
+    const second = await checkDedup(msgId);
+    expect(first).toBe(true);
+    expect(second).toBe(false);
+  });
 
-    // Simulate TTL expiry by deleting the key
-    await redis.del(key);
+  it('should allow through when messageId is null (fail open)', async () => {
+    const result = await checkDedup(null);
+    expect(result).toBe(true);
+  });
 
-    const result = await redis.set(key, '1', 'EX', 300, 'NX');
-    expect(result).toBe('OK');
+  it('should handle different message IDs independently', async () => {
+    const r1 = await checkDedup('msg_a');
+    const r2 = await checkDedup('msg_b');
+    expect(r1).toBe(true);
+    expect(r2).toBe(true);
   });
 });
