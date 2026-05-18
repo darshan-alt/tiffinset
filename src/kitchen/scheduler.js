@@ -45,7 +45,7 @@ async function leftoverCheckIn() {
       FROM order_history oh
       CROSS JOIN LATERAL jsonb_array_elements(oh.items) AS item_elem
       JOIN shelf_life_rules slr
-        ON (item_elem->>'product_name') ILIKE slr.item_pattern
+        ON (item_elem->>'product_name') ILIKE slr.item_category
       JOIN user_profiles up
         ON up.kitchen_id = oh.kitchen_id AND up.role = 'cook'
       WHERE oh.created_at >= NOW() - INTERVAL '14 days'

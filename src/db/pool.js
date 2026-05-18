@@ -103,7 +103,7 @@ export async function initDb() {
     );
 
     CREATE TABLE IF NOT EXISTS shelf_life_rules (
-      item_pattern     TEXT PRIMARY KEY,
+      item_category    TEXT PRIMARY KEY,
       shelf_days       INTEGER NOT NULL,
       check_after      INTEGER NOT NULL
     );
@@ -123,7 +123,7 @@ export async function initDb() {
 
   // Seed some shelf_life_rules if empty
   await pool.query(`
-    INSERT INTO shelf_life_rules (item_pattern, shelf_days, check_after) VALUES
+    INSERT INTO shelf_life_rules (item_category, shelf_days, check_after) VALUES
       ('%paneer%', 3, 2),
       ('%curd%', 3, 2),
       ('%yogurt%', 3, 2),
@@ -136,7 +136,7 @@ export async function initDb() {
       ('%chicken%', 2, 1),
       ('%fish%', 1, 1),
       ('%mutton%', 2, 1)
-    ON CONFLICT (item_pattern) DO NOTHING;
+    ON CONFLICT (item_category) DO NOTHING;
   `);
 
   console.log('[DB] Tables initialized');

@@ -1,0 +1,2 @@
+ubuntu:ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINN9nXVv88ReYninApffznHp+MeWOovkG4ql9rKRDwTe home@Darshans-MacBook-Air.local
+home:ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINN9nXVv88ReYninApffznHp+MeWOovkG4ql9rKRDwTe home@Darshans-MacBook-Air.local
